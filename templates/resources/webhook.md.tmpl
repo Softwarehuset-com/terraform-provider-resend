@@ -1,0 +1,25 @@
+---
+subcategory: ""
+page_title: "Resend: resend_webhook"
+description: |-
+  Manages a webhook that POSTs email events to an HTTPS endpoint. Subscribe `email.received` to receive parsed inbound email (mail-to-HTTP) for domains with receiving enabled. The `signing_secret` is sensitive and only known at creation (or after rotation via the Resend dashboard/API).
+---
+
+# resend_webhook
+
+Manages a webhook that POSTs email events to an HTTPS endpoint.
+
+## Example Usage
+
+{{ codefile "terraform" .ExampleFile }}
+
+{{ .SchemaMarkdown }}
+
+## Import
+
+Import is supported using the following syntax:
+
+```shell
+terraform import resend_webhook.inbound <webhook-id>
+```
+

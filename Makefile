@@ -18,4 +18,7 @@ testacc:
 vet:
 	go vet ./...
 
-.PHONY: default build fmt fmt-check test testacc vet
+docs:
+	go run github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs@latest generate
+
+.PHONY: default build fmt fmt-check test testacc vet docs

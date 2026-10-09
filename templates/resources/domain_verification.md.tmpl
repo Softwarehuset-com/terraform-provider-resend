@@ -1,0 +1,25 @@
+---
+subcategory: ""
+page_title: "Resend: resend_domain_verification"
+description: |-
+  Calls Resend's verify endpoint and polls the domain until verification completes (or fails). Point `depends_on` at the DNS resources created from `resend_domain.records` so records exist before verification runs. On failure the apply error lists every DNS record still not passing verification.
+---
+
+# resend_domain_verification
+
+Calls Resend's verify endpoint and polls the domain until verification completes (or fails).
+
+## Example Usage
+
+{{ codefile "terraform" .ExampleFile }}
+
+{{ .SchemaMarkdown }}
+
+## Import
+
+Import is supported using the following syntax (the verification resource's ID equals the domain ID):
+
+```shell
+terraform import resend_domain_verification.inbound <domain-id>
+```
+

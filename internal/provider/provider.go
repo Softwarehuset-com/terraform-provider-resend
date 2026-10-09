@@ -9,7 +9,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/resend/resend-go/v4"
 )
 
 const defaultBaseURL = "https://api.resend.com"
@@ -79,9 +78,7 @@ func (p *resendProvider) Configure(ctx context.Context, req provider.ConfigureRe
 		baseURL = defaultBaseURL
 	}
 
-	// TODO(task-2): replace with NewResendClient(apiKey, baseURL) once the
-	// retrying client exists. The override of BaseURL is likewise handled there.
-	client := resend.NewClient(apiKey)
+	client := NewResendClient(apiKey, baseURL)
 	resp.ResourceData = client
 }
 

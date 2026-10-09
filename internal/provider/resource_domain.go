@@ -386,7 +386,13 @@ func mapDomainToState(model *domainResourceModel, dom resend.Domain) {
 	model.OpenTracking = types.BoolValue(dom.OpenTracking)
 	model.ClickTracking = types.BoolValue(dom.ClickTracking)
 	model.Records, _ = mapRecords(dom.Records)
-	if dom.Capabilities != nil && model.Capabilities != nil {
+	if dom.Capabilities != nil {
+		// capabilities is Optional+Computed: values may legitimately be
+		// populated from the API even when the config omitted the block
+		// (import/refresh), so materialize the object as needed.
+		if model.Capabilities == nil {
+			model.Capabilities = &domainCapabilitiesModel{}
+		}
 		if dom.Capabilities.Sending != "" {
 			model.Capabilities.Sending = types.StringValue(dom.Capabilities.Sending)
 		}

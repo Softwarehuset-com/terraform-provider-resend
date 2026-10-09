@@ -240,10 +240,21 @@ func testAccPreCheck(t *testing.T) {
 	}
 }
 
+// testAccDomainBase returns the parent domain under which acceptance tests
+// create throwaway subdomains. Resend rejects reserved domains (example.com,
+// .test) with a misleading "registered already" error, so tests default to
+// the account's real domain. Override with TF_ACC_DOMAIN_BASE.
+func testAccDomainBase() string {
+	if base := os.Getenv("TF_ACC_DOMAIN_BASE"); base != "" {
+		return base
+	}
+	return "appcompany.com"
+}
+
 func TestAccDomainBasic(t *testing.T) {
 	testAccPreCheck(t)
 
-	name := fmt.Sprintf("tfacc-%d.example.com", time.Now().UnixNano()%1_000_000)
+	name := fmt.Sprintf("tfacc-%d.%s", time.Now().UnixNano(), testAccDomainBase())
 
 	tfresource.Test(t, tfresource.TestCase{
 		ProtoV6ProviderFactories: testAccProviderFactories,

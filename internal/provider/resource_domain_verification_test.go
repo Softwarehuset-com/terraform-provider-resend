@@ -71,7 +71,7 @@ func TestDomainVerificationReadGone(t *testing.T) {
 func TestAccDomainVerificationFailsWithoutDNS(t *testing.T) {
 	testAccPreCheck(t)
 
-	name := fmt.Sprintf("tfacc-%d.example.com", time.Now().UnixNano()%1_000_000)
+	name := fmt.Sprintf("tfacc-%d.%s", time.Now().UnixNano(), testAccDomainBase())
 
 	tfresource.Test(t, tfresource.TestCase{
 		ProtoV6ProviderFactories: testAccProviderFactories,

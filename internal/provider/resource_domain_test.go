@@ -2,11 +2,19 @@ package provider
 
 import (
 	"encoding/json"
+	"fmt"
 	"math/big"
+	"os"
+	"regexp"
 	"testing"
+	"time"
+
+	"github.com/hashicorp/terraform-plugin-framework/providerserver"
+	tfresource "github.com/hashicorp/terraform-plugin-testing/helper/resource"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	resend "github.com/resend/resend-go/v4"
 )
 
@@ -163,4 +171,65 @@ func TestMapRecords(t *testing.T) {
 	if got[0].Record.ValueString() != "SPF" || got[0].Type.ValueString() != "TXT" {
 		t.Errorf("record fields not mapped: %+v", got[0])
 	}
+}
+
+// --- Acceptance tests (require TF_ACC and RESEND_API_KEY) ---
+
+var testAccProviderFactories = map[string]func() (tfprotov6.ProviderServer, error){
+	"resend": providerserver.NewProtocol6WithError(New("test")()),
+}
+
+func testAccPreCheck(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("TF_ACC not set; skipping acceptance test")
+	}
+	if os.Getenv("RESEND_API_KEY") == "" {
+		t.Skip("RESEND_API_KEY not set; skipping acceptance test")
+	}
+}
+
+func TestAccDomainBasic(t *testing.T) {
+	testAccPreCheck(t)
+
+	name := fmt.Sprintf("tfacc-%d.example.com", time.Now().UnixNano()%1_000_000)
+
+	tfresource.Test(t, tfresource.TestCase{
+		ProtoV6ProviderFactories: testAccProviderFactories,
+		Steps: []tfresource.TestStep{
+			{
+				Config: testAccDomainConfig(name, "false"),
+				Check: tfresource.ComposeTestCheckFunc(
+					tfresource.TestCheckResourceAttr("resend_domain.test", "name", name),
+					tfresource.TestCheckResourceAttr("resend_domain.test", "capabilities.receiving", "enabled"),
+					tfresource.TestMatchResourceAttr("resend_domain.test", "records.#", regexp.MustCompile(`^[1-9]`)),
+				),
+			},
+			{
+				// In-place update: tracking toggles patch without replacement.
+				Config: testAccDomainConfig(name, "true"),
+				Check: tfresource.ComposeTestCheckFunc(
+					tfresource.TestCheckResourceAttr("resend_domain.test", "name", name),
+				),
+			},
+			{
+				ResourceName:      "resend_domain.test",
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
+func testAccDomainConfig(name, clickTracking string) string {
+	return fmt.Sprintf(`
+resource "resend_domain" "test" {
+  name = %[1]q
+  capabilities = {
+    sending   = "enabled"
+    receiving = "enabled"
+  }
+  tracking_subdomain = "links"
+  click_tracking     = %[2]s
+}
+`, name, clickTracking)
 }

@@ -2,11 +2,15 @@ package provider
 
 import (
 	"context"
+	"fmt"
+	"regexp"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
+	tfresource "github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	resend "github.com/resend/resend-go/v4"
 )
 
@@ -62,4 +66,39 @@ func TestDomainVerificationReadGone(t *testing.T) {
 	if !resp.State.Raw.IsNull() {
 		t.Error("expected state to be removed when domain is gone")
 	}
+}
+
+func TestAccDomainVerificationFailsWithoutDNS(t *testing.T) {
+	testAccPreCheck(t)
+
+	name := fmt.Sprintf("tfacc-%d.example.com", time.Now().UnixNano()%1_000_000)
+
+	tfresource.Test(t, tfresource.TestCase{
+		ProtoV6ProviderFactories: testAccProviderFactories,
+		Steps: []tfresource.TestStep{
+			{
+				Config:      testAccVerificationConfig(name),
+				ExpectError: regexp.MustCompile(`not verified|verifying domain`),
+			},
+		},
+	})
+}
+
+func testAccVerificationConfig(name string) string {
+	return fmt.Sprintf(`
+resource "resend_domain" "test" {
+  name = %[1]q
+  capabilities = {
+    sending   = "enabled"
+    receiving = "enabled"
+  }
+}
+
+resource "resend_domain_verification" "test" {
+  domain_id = resend_domain.test.id
+  timeouts = {
+    create = "1m"
+  }
+}
+`, name)
 }

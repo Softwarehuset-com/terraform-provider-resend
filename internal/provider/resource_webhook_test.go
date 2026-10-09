@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -9,6 +10,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	tfresource "github.com/hashicorp/terraform-plugin-testing/helper/resource"
 )
 
 func webhookSchema(t *testing.T) schema.Schema {
@@ -92,4 +94,41 @@ func TestWebhookEventValidator(t *testing.T) {
 	if run("email.received") {
 		t.Error(`"email.received" should be accepted by the events validator`)
 	}
+}
+
+func TestAccWebhookBasic(t *testing.T) {
+	testAccPreCheck(t)
+
+	tfresource.Test(t, tfresource.TestCase{
+		ProtoV6ProviderFactories: testAccProviderFactories,
+		Steps: []tfresource.TestStep{
+			{
+				Config: testAccWebhookConfig(`["email.received"]`),
+				Check: tfresource.ComposeTestCheckFunc(
+					tfresource.TestCheckResourceAttrSet("resend_webhook.test", "signing_secret"),
+				),
+			},
+			{
+				Config: testAccWebhookConfig(`["email.received", "email.sent"]`),
+				Check: tfresource.ComposeTestCheckFunc(
+					tfresource.TestCheckResourceAttrSet("resend_webhook.test", "signing_secret"),
+				),
+			},
+			{
+				ResourceName:            "resend_webhook.test",
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: []string{"signing_secret"},
+			},
+		},
+	})
+}
+
+func testAccWebhookConfig(events string) string {
+	return fmt.Sprintf(`
+resource "resend_webhook" "test" {
+  endpoint = "https://api.appcompany.com/hooks/resend"
+  events   = %s
+}
+`, events)
 }

@@ -1,20 +1,15 @@
 package provider
 
 import (
-	"strings"
-
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/nicolajhartmann/terraform-provider-resend/internal/domaincheck"
 )
 
 // IsNotFound reports whether an error returned by resend-go represents a
-// 404/not-found response. The SDK flattens most errors into plain strings, so
-// this matches on status code or "not found" text.
+// 404/not-found response. The matching logic lives in domaincheck so the
+// verification poller and provider resources share one implementation.
 func IsNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "404") || strings.Contains(msg, "not found")
+	return domaincheck.IsGone(err)
 }
 
 // diagFromErr converts an API error into a single ERROR diagnostic whose

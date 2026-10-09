@@ -64,8 +64,11 @@ func TestProviderSchema(t *testing.T) {
 	if got := apiKey.GetType().String(); got != "basetypes.StringType" {
 		t.Errorf("api_key type = %s, want string", got)
 	}
-	if !apiKey.IsRequired() {
-		t.Error("api_key should be required")
+	if !apiKey.IsOptional() {
+		t.Error("api_key should be optional (RESEND_API_KEY env fallback)")
+	}
+	if apiKey.IsRequired() {
+		t.Error("api_key must not be required; the env fallback would be unreachable")
 	}
 	if !apiKey.IsSensitive() {
 		t.Error("api_key should be sensitive")

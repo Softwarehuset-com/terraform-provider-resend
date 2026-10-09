@@ -59,11 +59,11 @@ resource "resend_domain" "inbound" {
 
 - `capabilities` (Attributes) Sending/receiving capabilities. Changing capabilities requires replacement. (see [below for nested schema](#nestedatt--capabilities))
 - `click_tracking` (Boolean) Track link clicks (requires tracking_subdomain).
-- `custom_return_path` (String) Subdomain for the Return-Path address used for SPF alignment and bounce handling. Defaults to send.
+- `custom_return_path` (String) Subdomain for the Return-Path address used for SPF alignment and bounce handling. Defaults to send on Resend's side. Changing this replaces the domain.
 - `open_tracking` (Boolean) Track email opens (requires tracking_subdomain).
-- `region` (String) Region emails are sent from. One of us-east-1, eu-west-1, sa-east-1, ap-northeast-1.
-- `tls` (String) TLS policy for outbound mail: opportunistic or enforced.
-- `tracking_subdomain` (String) Custom subdomain for open/click tracking (produces a CNAME record).
+- `region` (String) Region emails are sent from. One of us-east-1, eu-west-1, sa-east-1, ap-northeast-1. Defaults to us-east-1.
+- `tls` (String) TLS policy for outbound mail: opportunistic or enforced. Applied via an update after creation.
+- `tracking_subdomain` (String) Custom subdomain for open/click tracking (produces a CNAME record). Empty when unset.
 
 ### Read-Only
 
@@ -77,8 +77,8 @@ resource "resend_domain" "inbound" {
 
 Optional:
 
-- `receiving` (String) Enable receiving (inbound email via MX records): enabled or disabled.
-- `sending` (String) Enable sending: enabled or disabled.
+- `receiving` (String) Enable receiving (inbound email via MX records): enabled or disabled. Defaults to disabled.
+- `sending` (String) Enable sending: enabled or disabled. Defaults to enabled.
 
 
 <a id="nestedatt--records"></a>

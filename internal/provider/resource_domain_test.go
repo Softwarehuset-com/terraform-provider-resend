@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/types"
+
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 	tfresource "github.com/hashicorp/terraform-plugin-testing/helper/resource"
 
@@ -143,33 +146,82 @@ func TestMapRecords(t *testing.T) {
 			Value:    "feedback-smtp.us-east-1.amazonses.com",
 			Priority: json.Number("10"),
 		},
-		{
-			Record: "MX",
-			Name:   "automated.appcompany.com",
-			Type:   "MX",
-			Ttl:    "Auto",
-			Status: "pending",
-			Value:  "inbound.resend.io",
+	}
+
+	got, diags := mapRecords(in)
+	if diags.HasError() {
+		t.Fatalf("mapRecords errored: %v", diags)
+	}
+
+	if got.IsNull() || got.IsUnknown() {
+		t.Fatalf("records must be a known, non-null list, got %s", got)
+	}
+	elems := got.Elements()
+	if len(elems) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(elems))
+	}
+
+	first := elems[0].(types.Object)
+	prio, ok := first.Attributes()["priority"].(types.Number)
+	if !ok || !prio.IsNull() {
+		t.Errorf("TXT record priority should be null, got %s", first.Attributes()["priority"])
+	}
+	rec, _ := first.Attributes()["record"].(types.String)
+	if rec.ValueString() != "SPF" {
+		t.Errorf("record field not mapped: %v", first.Attributes()["record"])
+	}
+
+	second := elems[1].(types.Object)
+	prio = second.Attributes()["priority"].(types.Number)
+	if pf := prio.ValueBigFloat(); pf == nil || pf.Cmp(big.NewFloat(10)) != 0 {
+		t.Errorf("MX record priority should be 10, got %s", second.Attributes()["priority"])
+	}
+}
+
+// TestFinalizeDomainState pins the review finding that unknown values from
+// the plan must never leak into final state: Optional+Computed attributes
+// resolve to concrete values even when the API response omits them.
+func TestFinalizeDomainState(t *testing.T) {
+	m := domainResourceModel{
+		Name:              types.StringValue("automated.appcompany.com"),
+		Region:            types.StringUnknown(),
+		TrackingSubdomain: types.StringUnknown(),
+		OpenTracking:      types.BoolUnknown(),
+		ClickTracking:     types.BoolUnknown(),
+		Tls:               types.StringUnknown(),
+		Capabilities: &domainCapabilitiesModel{
+			Sending:   types.StringUnknown(),
+			Receiving: types.StringUnknown(),
 		},
 	}
 
-	got := mapRecords(in)
+	// Simulate an API response that omits region/capabilities entirely.
+	mapDomainToState(&m, resend.Domain{
+		Id:           "dom-1",
+		Name:         "automated.appcompany.com",
+		Status:       "not_started",
+		OpenTracking: false,
+	})
+	finalizeDomainState(&m)
 
-	if len(got) != 3 {
-		t.Fatalf("expected 3 records, got %d", len(got))
+	for name, v := range map[string]attr.Value{
+		"region":             m.Region,
+		"tracking_subdomain": m.TrackingSubdomain,
+	} {
+		if v.IsUnknown() {
+			t.Errorf("%s still unknown after finalize", name)
+		}
 	}
-	if !got[0].Priority.IsNull() {
-		t.Errorf("TXT record priority should be null, got %s", got[0].Priority)
+	if m.Tls.IsUnknown() {
+		t.Error("tls still unknown after finalize")
 	}
-	pf := got[1].Priority.ValueBigFloat()
-	if pf == nil || pf.Cmp(big.NewFloat(10)) != 0 {
-		t.Errorf("MX record priority should be 10, got %s", got[1].Priority)
+	if m.OpenTracking.IsUnknown() || m.ClickTracking.IsUnknown() {
+		t.Error("tracking bools still unknown after finalize")
 	}
-	if !got[2].Priority.IsNull() {
-		t.Errorf("record without priority should map to null, got %s", got[2].Priority)
-	}
-	if got[0].Record.ValueString() != "SPF" || got[0].Type.ValueString() != "TXT" {
-		t.Errorf("record fields not mapped: %+v", got[0])
+	if m.Capabilities != nil {
+		if m.Capabilities.Sending.IsUnknown() || m.Capabilities.Receiving.IsUnknown() {
+			t.Error("capabilities still unknown after finalize")
+		}
 	}
 }
 

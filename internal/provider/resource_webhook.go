@@ -10,6 +10,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	resend "github.com/resend/resend-go/v4"
@@ -96,19 +98,31 @@ func (r *webhookResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"id": schema.StringAttribute{
 				Computed:    true,
 				Description: "Resend webhook UUID.",
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"signing_secret": schema.StringAttribute{
 				Computed:    true,
 				Sensitive:   true,
 				Description: "Svix signing secret used to verify webhook deliveries. Only returned when the webhook is created or its secret is rotated; import leaves it null.",
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"status": schema.StringAttribute{
 				Computed:    true,
 				Description: "Webhook delivery status (e.g. enabled).",
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"created_at": schema.StringAttribute{
 				Computed:    true,
 				Description: "Creation timestamp.",
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 		},
 	}
@@ -146,9 +160,15 @@ func (r *webhookResource) Create(ctx context.Context, req resource.CreateRequest
 		plan.SigningSecret = types.StringValue(created.SigningSecret)
 	}
 
-	resp.Diagnostics.Append(r.refreshWebhook(ctx, &plan)...)
-	if resp.Diagnostics.HasError() {
-		return
+	// Persist state as soon as the remote object exists so a later failure
+	// cannot orphan it. Refresh is best-effort.
+	if hook, rerr := r.client.Webhooks.GetWithContext(ctx, created.Id); rerr == nil {
+		mapWebhookToState(&plan, hook)
+	} else {
+		resp.Diagnostics.AddWarning("refreshing webhook after create", rerr.Error())
+	}
+	if plan.SigningSecret.IsNull() {
+		plan.SigningSecret = types.StringNull()
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }

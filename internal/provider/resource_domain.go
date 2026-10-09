@@ -5,10 +5,13 @@ import (
 	"math/big"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -31,21 +34,13 @@ type domainResource struct {
 	client *resend.Client
 }
 
-type recordModel struct {
-	Record   types.String `tfsdk:"record"`
-	Name     types.String `tfsdk:"name"`
-	Type     types.String `tfsdk:"type"`
-	Ttl      types.String `tfsdk:"ttl"`
-	Status   types.String `tfsdk:"status"`
-	Value    types.String `tfsdk:"value"`
-	Priority types.Number `tfsdk:"priority"`
-}
-
 type domainCapabilitiesModel struct {
 	Sending   types.String `tfsdk:"sending"`
 	Receiving types.String `tfsdk:"receiving"`
 }
 
+// domainResourceModel uses types.List for records so the model can hold the
+// unknown value Terraform plans for computed collections at create time.
 type domainResourceModel struct {
 	Name              types.String             `tfsdk:"name"`
 	Region            types.String             `tfsdk:"region"`
@@ -58,7 +53,18 @@ type domainResourceModel struct {
 	ID                types.String             `tfsdk:"id"`
 	Status            types.String             `tfsdk:"status"`
 	CreatedAt         types.String             `tfsdk:"created_at"`
-	Records           []recordModel            `tfsdk:"records"`
+	Records           types.List               `tfsdk:"records"`
+}
+
+// recordAttrTypes is the object type of a records element.
+var recordAttrTypes = map[string]attr.Type{
+	"record":   types.StringType,
+	"name":     types.StringType,
+	"type":     types.StringType,
+	"ttl":      types.StringType,
+	"status":   types.StringType,
+	"value":    types.StringType,
+	"priority": types.NumberType,
 }
 
 func (r *domainResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -79,82 +85,116 @@ func (r *domainResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 			"region": schema.StringAttribute{
 				Optional:    true,
 				Computed:    true,
-				Description: "Region emails are sent from. One of us-east-1, eu-west-1, sa-east-1, ap-northeast-1.",
+				Description: "Region emails are sent from. One of us-east-1, eu-west-1, sa-east-1, ap-northeast-1. Defaults to us-east-1.",
 				Validators: []validator.String{
 					stringvalidator.OneOf("us-east-1", "eu-west-1", "sa-east-1", "ap-northeast-1"),
 				},
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
+					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
+			// tls and custom_return_path are write-only wishes: the Resend API
+			// does not return them, so they are Optional-only (never Computed)
+			// to avoid unknowable state and perpetual diffs.
 			"custom_return_path": schema.StringAttribute{
 				Optional:    true,
-				Computed:    true,
-				Description: "Subdomain for the Return-Path address used for SPF alignment and bounce handling. Defaults to send.",
+				Description: "Subdomain for the Return-Path address used for SPF alignment and bounce handling. Defaults to send on Resend's side. Changing this replaces the domain.",
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
 				},
 			},
 			"tls": schema.StringAttribute{
 				Optional:    true,
-				Computed:    true,
-				Description: "TLS policy for outbound mail: opportunistic or enforced.",
+				Description: "TLS policy for outbound mail: opportunistic or enforced. Applied via an update after creation.",
 				Validators: []validator.String{
 					stringvalidator.OneOf(resend.Opportunistic, resend.Enforced),
 				},
 			},
 			"tracking_subdomain": schema.StringAttribute{
 				Optional:    true,
-				Description: "Custom subdomain for open/click tracking (produces a CNAME record).",
+				Computed:    true,
+				Description: "Custom subdomain for open/click tracking (produces a CNAME record). Empty when unset.",
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"open_tracking": schema.BoolAttribute{
 				Optional:    true,
+				Computed:    true,
 				Description: "Track email opens (requires tracking_subdomain).",
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"click_tracking": schema.BoolAttribute{
 				Optional:    true,
+				Computed:    true,
 				Description: "Track link clicks (requires tracking_subdomain).",
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"capabilities": schema.SingleNestedAttribute{
 				Optional:    true,
+				Computed:    true,
 				Description: "Sending/receiving capabilities. Changing capabilities requires replacement.",
 				Attributes: map[string]schema.Attribute{
 					"sending": schema.StringAttribute{
 						Optional:    true,
 						Computed:    true,
-						Description: "Enable sending: enabled or disabled.",
+						Description: "Enable sending: enabled or disabled. Defaults to enabled.",
 						Validators: []validator.String{
 							stringvalidator.OneOf(resend.DomainCapabilityStatusEnabled, resend.DomainCapabilityStatusDisabled),
+						},
+						PlanModifiers: []planmodifier.String{
+							stringplanmodifier.UseStateForUnknown(),
 						},
 					},
 					"receiving": schema.StringAttribute{
 						Optional:    true,
 						Computed:    true,
-						Description: "Enable receiving (inbound email via MX records): enabled or disabled.",
+						Description: "Enable receiving (inbound email via MX records): enabled or disabled. Defaults to disabled.",
 						Validators: []validator.String{
 							stringvalidator.OneOf(resend.DomainCapabilityStatusEnabled, resend.DomainCapabilityStatusDisabled),
+						},
+						PlanModifiers: []planmodifier.String{
+							stringplanmodifier.UseStateForUnknown(),
 						},
 					},
 				},
 				PlanModifiers: []planmodifier.Object{
 					objectplanmodifier.RequiresReplace(),
+					objectplanmodifier.UseStateForUnknown(),
 				},
 			},
 			"id": schema.StringAttribute{
 				Computed:    true,
 				Description: "Resend domain UUID.",
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"status": schema.StringAttribute{
 				Computed:    true,
 				Description: "Domain status: not_started, pending, verified, partially_verified, failed, partially_failed.",
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"created_at": schema.StringAttribute{
 				Computed:    true,
 				Description: "Creation timestamp.",
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"records": schema.ListNestedAttribute{
 				Computed:    true,
 				Description: "DNS records Resend requires for this domain, including inbound MX records when receiving is enabled. Create these in your DNS provider.",
+				PlanModifiers: []planmodifier.List{
+					listplanmodifier.UseStateForUnknown(),
+				},
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
 						"record":   schema.StringAttribute{Computed: true, Description: "Record purpose: DKIM, SPF, MX or Tracking."},
@@ -191,10 +231,12 @@ func (r *domainResource) Create(ctx context.Context, req resource.CreateRequest,
 	}
 
 	createReq := &resend.CreateDomainRequest{
-		Name:              plan.Name.ValueString(),
-		Region:            plan.Region.ValueString(),
-		CustomReturnPath:  plan.CustomReturnPath.ValueString(),
-		TrackingSubdomain: plan.TrackingSubdomain.ValueString(),
+		Name:             plan.Name.ValueString(),
+		Region:           plan.Region.ValueString(),
+		CustomReturnPath: plan.CustomReturnPath.ValueString(),
+	}
+	if !plan.TrackingSubdomain.IsNull() && plan.TrackingSubdomain.IsUnknown() == false {
+		createReq.TrackingSubdomain = plan.TrackingSubdomain.ValueString()
 	}
 	if !plan.OpenTracking.IsNull() {
 		v := plan.OpenTracking.ValueBool()
@@ -219,20 +261,33 @@ func (r *domainResource) Create(ctx context.Context, req resource.CreateRequest,
 	}
 	plan.ID = types.StringValue(created.Id)
 
-	// The create endpoint does not accept tls; enforce it via update.
-	if plan.Tls.ValueString() == resend.Enforced {
-		_, err = r.client.Domains.UpdateWithContext(ctx, created.Id, &resend.UpdateDomainRequest{Tls: resend.Enforced})
-		if err != nil {
-			resp.Diagnostics.Append(diagFromErr("enforcing TLS on domain", err)...)
-			return
-		}
+	// Persist state as soon as the remote object exists so a later failure
+	// cannot orphan it. Refresh is best-effort here.
+	if dom, rerr := r.client.Domains.GetWithContext(ctx, created.Id); rerr == nil {
+		mapDomainToState(&plan, dom)
+	} else {
+		resp.Diagnostics.AddWarning("refreshing domain after create", rerr.Error())
 	}
-
-	resp.Diagnostics.Append(r.refreshDomain(ctx, &plan)...)
+	finalizeDomainState(&plan)
+	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+
+	// The create endpoint does not accept tls; enforce it via update.
+	if plan.Tls.ValueString() == resend.Enforced {
+		if _, uerr := r.client.Domains.UpdateWithContext(ctx, created.Id, &resend.UpdateDomainRequest{Tls: resend.Enforced}); uerr != nil {
+			resp.Diagnostics.Append(diagFromErr("enforcing TLS on domain", uerr)...)
+			return
+		}
+		if dom, rerr := r.client.Domains.GetWithContext(ctx, created.Id); rerr == nil {
+			mapDomainToState(&plan, dom)
+		} else {
+			resp.Diagnostics.AddWarning("refreshing domain after TLS update", rerr.Error())
+		}
+		finalizeDomainState(&plan)
+		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	}
 }
 
 func (r *domainResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -253,6 +308,7 @@ func (r *domainResource) Read(ctx context.Context, req resource.ReadRequest, res
 	}
 
 	mapDomainToState(&state, dom)
+	finalizeDomainState(&state)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
@@ -265,29 +321,36 @@ func (r *domainResource) Update(ctx context.Context, req resource.UpdateRequest,
 	}
 
 	updateReq := &resend.UpdateDomainRequest{}
-	if !plan.Tls.IsNull() && plan.Tls != state.Tls {
+	if !plan.Tls.IsNull() && !plan.Tls.Equal(state.Tls) {
 		updateReq.Tls = plan.Tls.ValueString()
 	}
-	if !plan.TrackingSubdomain.IsNull() && plan.TrackingSubdomain != state.TrackingSubdomain {
-		updateReq.TrackingSubdomain = plan.TrackingSubdomain.ValueString()
+	if !plan.TrackingSubdomain.IsUnknown() && !plan.TrackingSubdomain.Equal(state.TrackingSubdomain) {
+		if plan.TrackingSubdomain.IsNull() {
+			// The API cannot unset a tracking subdomain; keep the recorded
+			// value so plans stay stable.
+			plan.TrackingSubdomain = state.TrackingSubdomain
+		} else {
+			updateReq.TrackingSubdomain = plan.TrackingSubdomain.ValueString()
+		}
 	}
-	if !plan.OpenTracking.IsNull() && plan.OpenTracking != state.OpenTracking {
+	if !plan.OpenTracking.IsNull() && !plan.OpenTracking.Equal(state.OpenTracking) {
 		updateReq.SetOpenTracking(plan.OpenTracking.ValueBool())
 	}
-	if !plan.ClickTracking.IsNull() && plan.ClickTracking != state.ClickTracking {
+	if !plan.ClickTracking.IsNull() && !plan.ClickTracking.Equal(state.ClickTracking) {
 		updateReq.SetClickTracking(plan.ClickTracking.ValueBool())
 	}
 
-	_, err := r.client.Domains.UpdateWithContext(ctx, plan.ID.ValueString(), updateReq)
-	if err != nil {
+	if _, err := r.client.Domains.UpdateWithContext(ctx, plan.ID.ValueString(), updateReq); err != nil {
 		resp.Diagnostics.Append(diagFromErr("updating domain", err)...)
 		return
 	}
 
-	resp.Diagnostics.Append(r.refreshDomain(ctx, &plan)...)
-	if resp.Diagnostics.HasError() {
-		return
+	if dom, rerr := r.client.Domains.GetWithContext(ctx, plan.ID.ValueString()); rerr == nil {
+		mapDomainToState(&plan, dom)
+	} else {
+		resp.Diagnostics.AddWarning("refreshing domain after update", rerr.Error())
 	}
+	finalizeDomainState(&plan)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -309,16 +372,8 @@ func (r *domainResource) ImportState(ctx context.Context, req resource.ImportSta
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
 
-// refreshDomain fetches the current remote state of the domain into the model.
-func (r *domainResource) refreshDomain(ctx context.Context, model *domainResourceModel) diag.Diagnostics {
-	dom, err := r.client.Domains.GetWithContext(ctx, model.ID.ValueString())
-	if err != nil {
-		return diagFromErr("reading domain after write", err)
-	}
-	mapDomainToState(model, dom)
-	return nil
-}
-
+// mapDomainToState copies API-visible fields onto the model. Attributes the
+// API does not return (tls, custom_return_path) are never touched here.
 func mapDomainToState(model *domainResourceModel, dom resend.Domain) {
 	model.ID = types.StringValue(dom.Id)
 	model.Name = types.StringValue(dom.Name)
@@ -326,18 +381,12 @@ func mapDomainToState(model *domainResourceModel, dom resend.Domain) {
 	if dom.CreatedAt != "" {
 		model.CreatedAt = types.StringValue(dom.CreatedAt)
 	}
-	if dom.Region != "" {
-		model.Region = types.StringValue(dom.Region)
-	}
-	if dom.TrackingSubdomain != "" {
-		model.TrackingSubdomain = types.StringValue(dom.TrackingSubdomain)
-	}
+	model.Region = types.StringValue(dom.Region)
+	model.TrackingSubdomain = types.StringValue(dom.TrackingSubdomain)
 	model.OpenTracking = types.BoolValue(dom.OpenTracking)
 	model.ClickTracking = types.BoolValue(dom.ClickTracking)
-	if dom.Capabilities != nil {
-		if model.Capabilities == nil {
-			model.Capabilities = &domainCapabilitiesModel{}
-		}
+	model.Records, _ = mapRecords(dom.Records)
+	if dom.Capabilities != nil && model.Capabilities != nil {
 		if dom.Capabilities.Sending != "" {
 			model.Capabilities.Sending = types.StringValue(dom.Capabilities.Sending)
 		}
@@ -345,27 +394,71 @@ func mapDomainToState(model *domainResourceModel, dom resend.Domain) {
 			model.Capabilities.Receiving = types.StringValue(dom.Capabilities.Receiving)
 		}
 	}
-	model.Records = mapRecords(dom.Records)
 }
 
-func mapRecords(records []resend.Record) []recordModel {
-	out := make([]recordModel, 0, len(records))
+// finalizeDomainState guarantees every computed attribute holds a known,
+// concrete value, resolving unknowns with documented API defaults. Terraform
+// rejects unknown values in final state.
+func finalizeDomainState(model *domainResourceModel) {
+	if model.Records.IsNull() || model.Records.IsUnknown() {
+		model.Records = types.ListValueMust(
+			types.ObjectType{AttrTypes: recordAttrTypes},
+			nil,
+		)
+	}
+	if model.Status.IsNull() || model.Status.IsUnknown() {
+		model.Status = types.StringValue(resend.DomainStatusNotStarted)
+	}
+	if model.CreatedAt.IsNull() || model.CreatedAt.IsUnknown() {
+		model.CreatedAt = types.StringValue("")
+	}
+	if model.Region.IsNull() || model.Region.IsUnknown() {
+		model.Region = types.StringValue("us-east-1")
+	}
+	if model.TrackingSubdomain.IsNull() || model.TrackingSubdomain.IsUnknown() {
+		model.TrackingSubdomain = types.StringValue("")
+	}
+	if model.OpenTracking.IsNull() || model.OpenTracking.IsUnknown() {
+		model.OpenTracking = types.BoolValue(false)
+	}
+	if model.ClickTracking.IsNull() || model.ClickTracking.IsUnknown() {
+		model.ClickTracking = types.BoolValue(false)
+	}
+	if model.Tls.IsUnknown() {
+		model.Tls = types.StringNull()
+	}
+	if model.Capabilities != nil {
+		if model.Capabilities.Sending.IsNull() || model.Capabilities.Sending.IsUnknown() {
+			model.Capabilities.Sending = types.StringValue(resend.DomainCapabilityStatusEnabled)
+		}
+		if model.Capabilities.Receiving.IsNull() || model.Capabilities.Receiving.IsUnknown() {
+			model.Capabilities.Receiving = types.StringValue(resend.DomainCapabilityStatusDisabled)
+		}
+	}
+}
+
+func mapRecords(records []resend.Record) (types.List, diag.Diagnostics) {
+	elems := make([]attr.Value, 0, len(records))
 	for _, rec := range records {
-		m := recordModel{
-			Record:   types.StringValue(rec.Record),
-			Name:     types.StringValue(rec.Name),
-			Type:     types.StringValue(rec.Type),
-			Ttl:      types.StringValue(rec.Ttl),
-			Status:   types.StringValue(rec.Status),
-			Value:    types.StringValue(rec.Value),
-			Priority: types.NumberNull(),
+		obj := map[string]attr.Value{
+			"record":   types.StringValue(rec.Record),
+			"name":     types.StringValue(rec.Name),
+			"type":     types.StringValue(rec.Type),
+			"ttl":      types.StringValue(rec.Ttl),
+			"status":   types.StringValue(rec.Status),
+			"value":    types.StringValue(rec.Value),
+			"priority": types.NumberNull(),
 		}
 		if rec.Priority != "" {
 			if n, err := rec.Priority.Int64(); err == nil {
-				m.Priority = types.NumberValue(big.NewFloat(float64(n)))
+				obj["priority"] = types.NumberValue(big.NewFloat(float64(n)))
 			}
 		}
-		out = append(out, m)
+		objVal, diags := types.ObjectValue(recordAttrTypes, obj)
+		if diags.HasError() {
+			return types.ListNull(types.ObjectType{AttrTypes: recordAttrTypes}), diags
+		}
+		elems = append(elems, objVal)
 	}
-	return out
+	return types.ListValue(types.ObjectType{AttrTypes: recordAttrTypes}, elems)
 }

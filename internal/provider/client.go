@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -15,14 +16,16 @@ const (
 	defaultTimeout     = 60 * time.Second
 )
 
-// retryTransport retries idempotent-safe client errors (429) and server
-// errors (5xx) with bounded exponential backoff, honoring Retry-After when
-// present. Non-retryable statuses pass through untouched.
+// retryTransport retries rate limits (429, all methods) and server errors
+// (5xx, idempotent methods only) with bounded exponential backoff, honoring
+// Retry-After up to a cap. Non-retryable statuses pass through untouched.
 type retryTransport struct {
 	rt          http.RoundTripper
 	maxAttempts int
 	baseDelay   time.Duration
 }
+
+const retryAfterCap = 30 * time.Second
 
 func newRetryTransport(rt http.RoundTripper, maxAttempts int, baseDelay time.Duration) *retryTransport {
 	if rt == nil {
@@ -31,30 +34,55 @@ func newRetryTransport(rt http.RoundTripper, maxAttempts int, baseDelay time.Dur
 	return &retryTransport{rt: rt, maxAttempts: maxAttempts, baseDelay: baseDelay}
 }
 
+// retryableMethod reports whether replaying the request is safe. POSTs are
+// only retried on 429 (rate limiting means the request was not executed).
+func retryableMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodPut, http.MethodDelete, http.MethodPatch:
+		return true
+	}
+	return false
+}
+
 func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	backoff := t.baseDelay
 	var resp *http.Response
 	var err error
 
 	for attempt := 1; ; attempt++ {
-		// RoundTrip must not mutate the request; the SDK always builds fresh
-		// requests with GetBody set (bytes.Buffer body), so re-sending is safe.
 		resp, err = t.rt.RoundTrip(req)
-		if err != nil || !shouldRetry(resp) || attempt >= t.maxAttempts {
+		if err != nil || !shouldRetry(req, resp) || attempt >= t.maxAttempts {
 			return resp, err
 		}
 
 		delay := backoff
-		if resp != nil && resp.Header.Get("Retry-After") != "" {
-			if secs, perr := strconv.Atoi(resp.Header.Get("Retry-After")); perr == nil && secs >= 0 {
+		if ra := resp.Header.Get("Retry-After"); ra != "" {
+			if secs, perr := strconv.Atoi(ra); perr == nil && secs >= 0 {
 				delay = time.Duration(secs) * time.Second
 			}
 		}
-		if resp != nil && resp.Body != nil {
+		// A Retry-After beyond the cap (or the client timeout) means giving
+		// up and surfacing the throttled response.
+		if delay > retryAfterCap {
+			return resp, nil
+		}
+		// Drain and close so the keep-alive connection is reusable.
+		if resp.Body != nil {
+			io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 		}
 		if werr := sleepCtx(req.Context(), delay); werr != nil {
 			return nil, werr
+		}
+		// Rebuild the request for the next attempt: transports consume the
+		// body, and HTTP/2 does not rewind it automatically.
+		if req.GetBody != nil {
+			body, berr := req.GetBody()
+			if berr != nil {
+				return nil, berr
+			}
+			req = req.Clone(req.Context())
+			req.Body = body
 		}
 		if backoff *= 2; backoff > 30*time.Second {
 			backoff = 30 * time.Second
@@ -62,11 +90,14 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 }
 
-func shouldRetry(resp *http.Response) bool {
+func shouldRetry(req *http.Request, resp *http.Response) bool {
 	if resp == nil {
 		return false
 	}
-	return resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return true
+	}
+	return resp.StatusCode >= 500 && retryableMethod(req.Method)
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {

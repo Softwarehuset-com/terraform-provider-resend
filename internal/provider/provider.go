@@ -36,7 +36,7 @@ func (p *resendProvider) Schema(_ context.Context, _ provider.SchemaRequest, res
 	resp.Schema = schema.Schema{
 		Attributes: map[string]schema.Attribute{
 			"api_key": schema.StringAttribute{
-				Required:    true,
+				Optional:    true,
 				Sensitive:   true,
 				Description: "Resend API key. Defaults to the RESEND_API_KEY environment variable.",
 			},

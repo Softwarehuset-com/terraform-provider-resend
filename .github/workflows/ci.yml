@@ -44,5 +44,6 @@ jobs:
       - name: Acceptance tests (real API)
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          TF_ACC_DOMAIN_BASE: ${{ secrets.TF_ACC_DOMAIN_BASE }}
           TF_ACC: "1"
         run: go test ./internal/provider/ -run TestAcc -v -timeout 12m

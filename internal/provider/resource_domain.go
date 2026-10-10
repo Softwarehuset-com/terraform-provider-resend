@@ -386,20 +386,28 @@ func mapDomainToState(model *domainResourceModel, dom resend.Domain) {
 	model.OpenTracking = types.BoolValue(dom.OpenTracking)
 	model.ClickTracking = types.BoolValue(dom.ClickTracking)
 	model.Records, _ = mapRecords(dom.Records)
-	if dom.Capabilities != nil {
-		// capabilities is Optional+Computed: values may legitimately be
-		// populated from the API even when the config omitted the block
-		// (import/refresh), so materialize the object as needed.
-		if model.Capabilities == nil {
-			model.Capabilities = &domainCapabilitiesModel{}
-		}
-		if dom.Capabilities.Sending != "" {
-			model.Capabilities.Sending = types.StringValue(dom.Capabilities.Sending)
-		}
-		if dom.Capabilities.Receiving != "" {
-			model.Capabilities.Receiving = types.StringValue(dom.Capabilities.Receiving)
-		}
+	model.Capabilities = mapDomainCapabilities(dom.Capabilities, model.Capabilities)
+}
+
+// mapDomainCapabilities materializes API capabilities onto the model.
+// capabilities is Optional+Computed: values may legitimately be populated
+// from the API even when the config omitted the block (import/refresh), so
+// an existing model object is filled in place. A nil API value leaves the
+// model untouched. Shared by the resend_domain resource and data source.
+func mapDomainCapabilities(caps *resend.DomainCapabilities, model *domainCapabilitiesModel) *domainCapabilitiesModel {
+	if caps == nil {
+		return model
 	}
+	if model == nil {
+		model = &domainCapabilitiesModel{}
+	}
+	if caps.Sending != "" {
+		model.Sending = types.StringValue(caps.Sending)
+	}
+	if caps.Receiving != "" {
+		model.Receiving = types.StringValue(caps.Receiving)
+	}
+	return model
 }
 
 // finalizeDomainState guarantees every computed attribute holds a known,

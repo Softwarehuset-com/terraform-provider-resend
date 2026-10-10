@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/Softwarehuset-com/terraform-provider-resend/internal/domaincheck"
 	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -11,7 +12,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/nicolajhartmann/terraform-provider-resend/internal/domaincheck"
 	resend "github.com/resend/resend-go/v4"
 )
 

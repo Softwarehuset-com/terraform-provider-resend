@@ -16,7 +16,7 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      - -X github.com/nicolajhartmann/terraform-provider-resend/version.Version={{.Version}}
+      - -X github.com/Softwarehuset-com/terraform-provider-resend/version.Version={{.Version}}
 
 archives:
   - format: zip

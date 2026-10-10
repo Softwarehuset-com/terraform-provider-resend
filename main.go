@@ -8,9 +8,9 @@ import (
 	"flag"
 	"log"
 
+	"github.com/Softwarehuset-com/terraform-provider-resend/internal/provider"
+	"github.com/Softwarehuset-com/terraform-provider-resend/version"
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
-	"github.com/nicolajhartmann/terraform-provider-resend/internal/provider"
-	"github.com/nicolajhartmann/terraform-provider-resend/version"
 )
 
 func main() {
@@ -20,7 +20,7 @@ func main() {
 	flag.Parse()
 
 	opts := providerserver.ServeOpts{
-		Address: "registry.terraform.io/nicolajhartmann/resend",
+		Address: "registry.terraform.io/Softwarehuset-com/resend",
 		Debug:   debug,
 	}
 

@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Softwarehuset-com/terraform-provider-resend/internal/provider"
 	tfprovider "github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
-	"github.com/nicolajhartmann/terraform-provider-resend/internal/provider"
 	"github.com/resend/resend-go/v4"
 )
 

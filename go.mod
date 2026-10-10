@@ -1,4 +1,4 @@
-module github.com/nicolajhartmann/terraform-provider-resend
+module github.com/Softwarehuset-com/terraform-provider-resend
 
 go 1.27.1
 

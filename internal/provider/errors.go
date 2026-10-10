@@ -1,8 +1,8 @@
 package provider
 
 import (
+	"github.com/Softwarehuset-com/terraform-provider-resend/internal/domaincheck"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
-	"github.com/nicolajhartmann/terraform-provider-resend/internal/domaincheck"
 )
 
 // IsNotFound reports whether an error returned by resend-go represents a

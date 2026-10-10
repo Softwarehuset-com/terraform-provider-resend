@@ -26,3 +26,23 @@ jobs:
 
       - name: Test
         run: go test ./... -v -timeout=120s
+
+  # Integration tests against the real Resend API. Creates and destroys
+  # throwaway tfacc-* domains and one webhook in the account behind
+  # RESEND_API_KEY. On fork PRs the secret is withheld, so testAccPreCheck
+  # skips these tests and the job stays green.
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Acceptance tests (real API)
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          TF_ACC: "1"
+        run: go test ./internal/provider/ -run TestAcc -v -timeout 12m

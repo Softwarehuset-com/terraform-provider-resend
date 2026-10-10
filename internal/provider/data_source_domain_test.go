@@ -2,13 +2,19 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	datasourceschema "github.com/hashicorp/terraform-plugin-framework/datasource/schema"
+	tfsdk "github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	tfresource "github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	resend "github.com/resend/resend-go/v4"
 )
@@ -176,4 +182,65 @@ data "resend_domain" "test" {
   name = resend_domain.test.name
 }
 `, name)
+}
+
+// TestDomainDataSourceReadNamePathFetchesFullDomain pins the CI finding:
+// the List endpoint omits records, so the name-lookup path must GET the
+// matched domain by id to return the full record set.
+func TestDomainDataSourceReadNamePathFetchesFullDomain(t *testing.T) {
+	var getPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/domains"):
+			// List: no records field at all.
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{{"id": "d-1", "name": "mail.appcompany.com", "status": "verified", "region": "us-east-1"}},
+			})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/domains/d-1"):
+			getPath = r.URL.Path
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "d-1", "name": "mail.appcompany.com", "status": "verified", "region": "us-east-1",
+				"records": []map[string]any{{"record": "SPF", "name": "send", "type": "TXT", "ttl": "Auto", "status": "verified", "value": "v=spf1"}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	r := &domainDataSource{client: NewResendClient("re_test", srv.URL)}
+	sch := domainDataSourceSchema(t)
+	objType := sch.Type().TerraformType(context.Background())
+
+	raw := map[string]tftypes.Value{
+		"id":   tftypes.NewValue(tftypes.String, nil),
+		"name": tftypes.NewValue(tftypes.String, "mail.appcompany.com"),
+	}
+	for attr, at := range objType.(tftypes.Object).AttributeTypes {
+		if _, set := raw[attr]; !set {
+			raw[attr] = tftypes.NewValue(at, nil)
+		}
+	}
+	req := datasource.ReadRequest{
+		Config: tfsdk.Config{Raw: tftypes.NewValue(objType, raw), Schema: sch},
+	}
+	resp := &datasource.ReadResponse{
+		State: tfsdk.State{Raw: tftypes.NewValue(objType, tftypes.UnknownValue), Schema: sch},
+	}
+	r.Read(context.Background(), req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("read should succeed: %v", resp.Diagnostics)
+	}
+	if getPath == "" {
+		t.Fatal("name lookup must follow up with a GET on the matched id")
+	}
+	var state domainDataSourceModel
+	if diags := resp.State.Get(context.Background(), &state); diags.HasError() {
+		t.Fatalf("reading back state: %v", diags)
+	}
+	if state.Records.IsNull() || len(state.Records.Elements()) != 1 {
+		t.Errorf("records must come from the full GET, got: %v", state.Records)
+	}
 }

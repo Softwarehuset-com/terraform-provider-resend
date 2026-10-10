@@ -139,7 +139,13 @@ func (d *domainDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 			)
 			return
 		case 1:
-			dom = matches[0]
+			// The List endpoint omits records; fetch the full domain.
+			found, err := d.client.Domains.GetWithContext(ctx, matches[0].Id)
+			if err != nil {
+				resp.Diagnostics.Append(diagFromErr(fmt.Sprintf("reading domain %q", matches[0].Id), err)...)
+				return
+			}
+			dom = found
 		default:
 			resp.Diagnostics.AddError(
 				"ambiguous domain name",

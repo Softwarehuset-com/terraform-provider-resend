@@ -1,0 +1,4 @@
+.superpowers/
+terraform-provider-resend
+/dist/
+.terraform*

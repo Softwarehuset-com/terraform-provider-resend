@@ -1,0 +1,25 @@
+---
+subcategory: ""
+page_title: "Resend: resend_domain"
+description: |-
+  Registers a domain with Resend. With `capabilities.receiving = "enabled"` Resend serves MX records so any address at the domain can receive inbound email (forwarded to webhooks). The `records` attribute lists every DNS record you must publish - DKIM, SPF, MX and tracking CNAME, including inbound MX records when receiving is enabled.
+---
+
+# resend_domain
+
+Registers a domain with Resend.
+
+## Example Usage
+
+{{ codefile "terraform" .ExampleFile }}
+
+{{ .SchemaMarkdown }}
+
+## Import
+
+Import is supported using the following syntax:
+
+```shell
+terraform import resend_domain.inbound <domain-id>
+```
+

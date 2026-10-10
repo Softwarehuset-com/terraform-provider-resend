@@ -12,8 +12,8 @@
 
 ## Global Constraints
 
-- Module path: `github.com/nicolajhartmann/terraform-provider-resend` (rename at release if org differs).
-- Provider registry address in `main.go`: `registry.terraform.io/nicolajhartmann/resend`.
+- Module path: `github.com/Softwarehuset-com/terraform-provider-resend` (rename at release if org differs).
+- Provider registry address in `main.go`: `registry.terraform.io/Softwarehuset-com/resend`.
 - SDK facts locked by source inspection (resend-go v4.8.2):
   - `CreateDomainRequest`: `Name, Region, CustomReturnPath, TrackingSubdomain, OpenTracking *bool, ClickTracking *bool, Capabilities *DomainCapabilities` — **no `tls`**.
   - `UpdateDomainRequest` (PATCH): `OpenTracking, ClickTracking` (use `SetOpenTracking`/`SetClickTracking` to send explicit false), `Tls`, `TrackingSubdomain` only → `name`, `region`, `custom_return_path`, `capabilities` changes are **RequiresReplace**.
@@ -50,7 +50,7 @@ Five input classes the task tests below do not already pin, each with its owning
 
 - [ ] **Step 1: Init module + fetch deps**
 
-Run: `go mod init github.com/nicolajhartmann/terraform-provider-resend && go get github.com/hashicorp/terraform-plugin-framework@v1.19.0 github.com/hashicorp/terraform-plugin-testing@latest github.com/resend/resend-go/v4@v4.8.2`
+Run: `go mod init github.com/Softwarehuset-com/terraform-provider-resend && go get github.com/hashicorp/terraform-plugin-framework@v1.19.0 github.com/hashicorp/terraform-plugin-testing@latest github.com/resend/resend-go/v4@v4.8.2`
 Record resolved `terraform-plugin-testing` version in the commit message.
 
 - [ ] **Step 2: Write failing provider tests** in `internal/provider/provider_test.go`
@@ -64,7 +64,7 @@ Two tests, plain `go test` (no TF CLI):
 Run: `go test ./internal/provider/ -run 'TestProvider' -v`
 Expected: FAIL — `provider.New` undefined.
 
-- [4] **Step 4: Implement** `main.go` (`providerserver.Serve`, `Address: "registry.terraform.io/nicolajhartmann/resend"`, `-debug` flag, `version` var) and `internal/provider/provider.go`:
+- [4] **Step 4: Implement** `main.go` (`providerserver.Serve`, `Address: "registry.terraform.io/Softwarehuset-com/resend"`, `-debug` flag, `version` var) and `internal/provider/provider.go`:
 - `Schema`: `api_key` (string, required, sensitive, schema.StringDefault none — `Description: "Resend API key. Defaults to the RESEND_API_KEY environment variable."`), `base_url` (string, optional, `schema.StringDefault("https://api.resend.com")`).
 - `Configure`: read env `RESEND_API_KEY` as fallback; if the combined value is `""` → `diag.AddError("Invalid or missing RESEND_API key", ...)` (mentions `RESEND_API_KEY`); else `NewResendClient(key, baseURL)` (Task 2 provides it — until then, inline `resend.NewClient(key)` and refactor in Task 2) into `resp.ResourceData`.
 - Resources registered: `NewDomainResource`, `NewDomainVerificationResource`, `NewWebhookResource` — create stub files returning `resource.Resource` that fail loudly if used before Tasks 3–5 (schema with just `id`), so the provider compiles.

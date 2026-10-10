@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	resend "github.com/resend/resend-go/v4"
 )
@@ -17,6 +19,7 @@ import (
 // verify calls and replays claim states.
 type fakeClaims struct {
 	states      []resend.DomainClaim
+	verifyErr   error
 	verifyCalls int
 	calls       int
 }
@@ -31,7 +34,7 @@ func (f *fakeClaims) GetWithContext(_ context.Context, _ string) (resend.DomainC
 
 func (f *fakeClaims) VerifyWithContext(_ context.Context, _ string) (resend.DomainClaim, error) {
 	f.verifyCalls++
-	return resend.DomainClaim{}, nil
+	return resend.DomainClaim{}, f.verifyErr
 }
 
 func claimVerificationSchemaResp(t *testing.T) *resource.SchemaResponse {
@@ -48,25 +51,26 @@ func claimVerificationSchemaResp(t *testing.T) *resource.SchemaResponse {
 	return resp
 }
 
-func claimVerificationRaw(objType tftypes.Type, domainID interface{}, status interface{}) map[string]tftypes.Value {
+func claimVerificationRaw(objType tftypes.Type, domainID, status, wait interface{}) map[string]tftypes.Value {
 	attrTypes := objType.(tftypes.Object).AttributeTypes
 	return map[string]tftypes.Value{
 		"domain_id": tftypes.NewValue(attrTypes["domain_id"], domainID),
 		"status":    tftypes.NewValue(attrTypes["status"], status),
 		// Real Terraform sends unknown for computed attributes at create.
-		"blocked_reason": tftypes.NewValue(attrTypes["blocked_reason"], tftypes.UnknownValue),
-		"failure_reason": tftypes.NewValue(attrTypes["failure_reason"], tftypes.UnknownValue),
-		"timeouts":       tftypes.NewValue(attrTypes["timeouts"], nil),
+		"blocked_reason":      tftypes.NewValue(attrTypes["blocked_reason"], tftypes.UnknownValue),
+		"failure_reason":      tftypes.NewValue(attrTypes["failure_reason"], tftypes.UnknownValue),
+		"wait_until_verified": tftypes.NewValue(attrTypes["wait_until_verified"], wait),
+		"timeouts":            tftypes.NewValue(attrTypes["timeouts"], nil),
 	}
 }
 
-func claimVerificationCreatePair(t *testing.T) (resource.CreateRequest, *resource.CreateResponse) {
+func claimVerificationCreatePair(t *testing.T, wait interface{}) (resource.CreateRequest, *resource.CreateResponse) {
 	t.Helper()
 	s := claimVerificationSchemaResp(t).Schema
 	objType := s.Type().TerraformType(context.Background())
 
 	// Computed attributes are unknown at create, like real Terraform plans.
-	raw := claimVerificationRaw(objType, "dom-1", tftypes.UnknownValue)
+	raw := claimVerificationRaw(objType, "dom-1", tftypes.UnknownValue, wait)
 	req := resource.CreateRequest{
 		Plan: tfsdk.Plan{Raw: tftypes.NewValue(objType, raw), Schema: s},
 	}
@@ -96,6 +100,17 @@ func TestDomainClaimVerificationSchema(t *testing.T) {
 	if _, has := s.Attributes["timeouts"]; !has {
 		t.Error("verification resource should carry a timeouts block")
 	}
+
+	wait, ok := s.Attributes["wait_until_verified"].(schema.BoolAttribute)
+	if !ok {
+		t.Fatalf("wait_until_verified should be bool attribute, got %T", s.Attributes["wait_until_verified"])
+	}
+	if !wait.Optional || !wait.Computed {
+		t.Error("wait_until_verified should be Optional+Computed")
+	}
+	if defaultBoolValue(t, wait) {
+		t.Error("wait_until_verified must default to false (non-blocking verification)")
+	}
 }
 
 func TestDomainClaimVerificationCreateVerified(t *testing.T) {
@@ -111,7 +126,7 @@ func TestDomainClaimVerificationCreateVerified(t *testing.T) {
 		sleep:  func(context.Context, time.Duration) error { return nil },
 	}
 
-	req, resp := claimVerificationCreatePair(t)
+	req, resp := claimVerificationCreatePair(t, true)
 	r.Create(context.Background(), req, resp)
 
 	if resp.Diagnostics.HasError() {
@@ -138,13 +153,79 @@ func TestDomainClaimVerificationCreateVerified(t *testing.T) {
 	}
 }
 
+// Opt-in strict mode re-triggers verification on a cadence while the claim
+// stays pending: Resend only re-checks the TXT record when verify is called.
+func TestDomainClaimVerificationCreateReTriggersWhilePending(t *testing.T) {
+	fake := &fakeClaims{
+		states: []resend.DomainClaim{
+			{Status: resend.DomainClaimStatusPending},
+			{Status: resend.DomainClaimStatusPending},
+			{Status: resend.DomainClaimStatusVerified},
+		},
+	}
+	r := &domainClaimVerificationResource{
+		claims:        fake,
+		sleep:         func(context.Context, time.Duration) error { return nil },
+		reverifyEvery: time.Nanosecond,
+	}
+
+	req, resp := claimVerificationCreatePair(t, true)
+	r.Create(context.Background(), req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("create should succeed: %v", resp.Diagnostics)
+	}
+	if fake.verifyCalls != 3 { // initial trigger + one re-trigger per pending poll
+		t.Errorf("expected initial trigger plus 2 re-triggers, got %d", fake.verifyCalls)
+	}
+}
+
+// Default (unset wait_until_verified) triggers verification once and returns
+// immediately — no polling, no timeout.
+func TestDomainClaimVerificationCreateDefaultDoesNotWait(t *testing.T) {
+	fake := &fakeClaims{
+		states: []resend.DomainClaim{{Status: resend.DomainClaimStatusPending, DomainId: "dom-1"}},
+	}
+	r := &domainClaimVerificationResource{
+		claims: fake,
+		sleep:  func(context.Context, time.Duration) error { return nil },
+	}
+
+	req, resp := claimVerificationCreatePair(t, false)
+	r.Create(context.Background(), req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("create should succeed without waiting: %v", resp.Diagnostics)
+	}
+	if fake.verifyCalls != 1 {
+		t.Errorf("expected only the initial verify trigger, got %d", fake.verifyCalls)
+	}
+	if fake.calls != 1 {
+		t.Errorf("expected exactly one status read, got %d", fake.calls)
+	}
+	var state domainClaimVerificationResourceModel
+	if diags := resp.State.Get(context.Background(), &state); diags.HasError() {
+		t.Fatalf("reading back state: %v", diags)
+	}
+	if state.Status.ValueString() != resend.DomainClaimStatusPending {
+		t.Errorf("expected pending status recorded, got %q", state.Status.ValueString())
+	}
+	if state.WaitUntilVerified.ValueBool() {
+		t.Error("wait_until_verified should be false in state")
+	}
+	// Reasons must be concrete even in non-wait mode.
+	if state.BlockedReason.IsUnknown() || state.BlockedReason.IsNull() {
+		t.Error("blocked_reason must be a concrete (possibly empty) string in final state")
+	}
+}
+
 func claimVerificationCreateExpectError(t *testing.T, fake *fakeClaims, wantSubstr string) {
 	t.Helper()
 	r := &domainClaimVerificationResource{
 		claims: fake,
 		sleep:  func(context.Context, time.Duration) error { return nil },
 	}
-	req, resp := claimVerificationCreatePair(t)
+	req, resp := claimVerificationCreatePair(t, true)
 	r.Create(context.Background(), req, resp)
 
 	if !resp.Diagnostics.HasError() {
@@ -177,14 +258,55 @@ func TestDomainClaimVerificationCreateFailedSurfacesReason(t *testing.T) {
 	}, "TXT record mismatch")
 }
 
+// In-place updates carry computed attributes as unknown in the plan; all
+// three computed attributes must stay concrete in final state.
+func TestDomainClaimVerificationUpdateCarriesComputed(t *testing.T) {
+	s := claimVerificationSchemaResp(t).Schema
+	objType := s.Type().TerraformType(context.Background())
+	r := &domainClaimVerificationResource{
+		claims: &fakeClaims{states: []resend.DomainClaim{{Status: resend.DomainClaimStatusVerified}}},
+	}
+
+	stateRaw := claimVerificationRaw(objType, "dom-1", resend.DomainClaimStatusVerified, true)
+	planRaw := claimVerificationRaw(objType, "dom-1", tftypes.UnknownValue, false)
+
+	req := resource.UpdateRequest{
+		Plan:  tfsdk.Plan{Raw: tftypes.NewValue(objType, planRaw), Schema: s},
+		State: tfsdk.State{Raw: tftypes.NewValue(objType, stateRaw), Schema: s},
+	}
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: s}}
+
+	r.Update(context.Background(), req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("update should succeed: %v", resp.Diagnostics)
+	}
+	var model domainClaimVerificationResourceModel
+	if diags := resp.State.Get(context.Background(), &model); diags.HasError() {
+		t.Fatalf("reading back state: %v", diags)
+	}
+	if model.Status.IsUnknown() || model.Status.IsNull() {
+		t.Fatal("status must be carried from state, not left unknown in final state")
+	}
+	if model.BlockedReason.IsUnknown() || model.BlockedReason.IsNull() {
+		t.Fatal("blocked_reason must be concrete in final state")
+	}
+	if model.FailureReason.IsUnknown() || model.FailureReason.IsNull() {
+		t.Fatal("failure_reason must be concrete in final state")
+	}
+	if model.WaitUntilVerified.ValueBool() {
+		t.Error("wait_until_verified should be false after removal")
+	}
+}
+
 func TestDomainClaimVerificationReadSemantics(t *testing.T) {
 	s := claimVerificationSchemaResp(t).Schema
 	objType := s.Type().TerraformType(context.Background())
 
-	run := func(status string) bool {
+	run := func(status string, wait interface{}) bool {
 		fake := &fakeClaims{states: []resend.DomainClaim{{Status: status}}}
 		r := &domainClaimVerificationResource{claims: fake}
-		raw := claimVerificationRaw(objType, "dom-1", status)
+		raw := claimVerificationRaw(objType, "dom-1", status, wait)
 		st := tfsdk.State{Raw: tftypes.NewValue(objType, raw), Schema: s}
 		resp := &resource.ReadResponse{State: st}
 		r.Read(context.Background(), resource.ReadRequest{State: st}, resp)
@@ -194,16 +316,89 @@ func TestDomainClaimVerificationReadSemantics(t *testing.T) {
 		return !resp.State.Raw.IsNull()
 	}
 
+	// Strict mode (wait_until_verified = true) keeps v1.x semantics.
 	for _, status := range []string{
 		resend.DomainClaimStatusVerified,
 		resend.DomainClaimStatusCompleted,
 		resend.DomainClaimStatusExpired,
 	} {
-		if !run(status) {
+		if !run(status, true) {
 			t.Errorf("status %q should keep the resource in state", status)
 		}
 	}
-	if run(resend.DomainClaimStatusPending) {
+	if run(resend.DomainClaimStatusPending, true) {
 		t.Error("pending claim should be removed from state to re-trigger verification")
+	}
+
+	// Non-waiting mode keeps the resource regardless of status.
+	for _, status := range []string{
+		resend.DomainClaimStatusPending,
+		resend.DomainClaimStatusBlocked,
+		resend.DomainClaimStatusFailed,
+		resend.DomainClaimStatusExpired,
+		resend.DomainClaimStatusSuperseded,
+		resend.DomainClaimStatusCanceled,
+	} {
+		if !run(status, false) {
+			t.Errorf("non-waiting: status %q should keep the resource in state", status)
+		}
+	}
+}
+
+// A failing verify trigger must fail the create even in non-wait mode —
+// silently recording a stale status would hide the API error.
+func TestDomainClaimVerificationCreateDefaultVerifyTriggerFails(t *testing.T) {
+	fake := &fakeClaims{
+		states:    []resend.DomainClaim{{Status: resend.DomainClaimStatusPending}},
+		verifyErr: errors.New("missing_permissions"),
+	}
+	r := &domainClaimVerificationResource{
+		claims: fake,
+		sleep:  func(context.Context, time.Duration) error { return nil },
+	}
+
+	req, resp := claimVerificationCreatePair(t, false)
+	r.Create(context.Background(), req, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("create must fail when the verify trigger fails")
+	}
+	var msg strings.Builder
+	for _, d := range resp.Diagnostics {
+		msg.WriteString(d.Summary() + " " + d.Detail() + " ")
+	}
+	if !strings.Contains(msg.String(), "missing_permissions") {
+		t.Errorf("error should surface the API cause, got: %s", msg.String())
+	}
+}
+
+// Non-waiting Read refreshes status and keeps reason attributes concrete.
+func TestDomainClaimVerificationReadRefreshesReasons(t *testing.T) {
+	s := claimVerificationSchemaResp(t).Schema
+	objType := s.Type().TerraformType(context.Background())
+
+	fake := &fakeClaims{states: []resend.DomainClaim{{
+		Status:        resend.DomainClaimStatusBlocked,
+		BlockedReason: resend.DomainClaimBlockedReasonGracePeriod,
+	}}}
+	r := &domainClaimVerificationResource{claims: fake}
+
+	raw := claimVerificationRaw(objType, "dom-1", resend.DomainClaimStatusPending, false)
+	st := tfsdk.State{Raw: tftypes.NewValue(objType, raw), Schema: s}
+	resp := &resource.ReadResponse{State: st}
+	r.Read(context.Background(), resource.ReadRequest{State: st}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("read should succeed: %v", resp.Diagnostics)
+	}
+	var state domainClaimVerificationResourceModel
+	if diags := resp.State.Get(context.Background(), &state); diags.HasError() {
+		t.Fatalf("reading back state: %v", diags)
+	}
+	if state.Status.ValueString() != resend.DomainClaimStatusBlocked {
+		t.Errorf("expected refreshed blocked status, got %q", state.Status.ValueString())
+	}
+	if got := state.BlockedReason; got.IsNull() || got.IsUnknown() || got.Equal(types.StringValue("")) {
+		t.Errorf("expected refreshed blocked_reason, got %v", got)
 	}
 }

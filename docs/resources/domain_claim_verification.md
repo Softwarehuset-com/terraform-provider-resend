@@ -2,12 +2,18 @@
 subcategory: ""
 page_title: "Resend: resend_domain_claim_verification"
 description: |-
-  Triggers verification of a Resend domain claim and waits until the TXT record check passes (status verified or completed). Publish the claim's TXT record first and point depends_on at the DNS resources so they exist before verification runs. A failed verification is not persisted, so the next apply retries automatically.
+  Triggers the TXT record check for a Resend domain claim. By default it returns immediately with the current status, so applies stay green while DNS propagates. Set `wait_until_verified = true` to block until the claim is verified. Publish the claim's TXT record first.
 ---
 
 # resend_domain_claim_verification
 
-Triggers claim verification and polls until it passes.
+Triggers verification of a Resend domain claim (`resend_domain_claim`).
+
+By default (`wait_until_verified = false`) the resource triggers the TXT record check once, records the current status, and returns. The status settles via refresh; nothing blocks the apply.
+
+With `wait_until_verified = true` the create blocks until the claim reaches `verified` or `completed`, bounded by `timeouts.create` (default 10m). While waiting, the provider re-triggers the check every 60 seconds, since Resend re-examines the TXT record only when verification is triggered. Blocked claims surface their reason (for example `grace_period` while the previous owner's window runs); failed ones surface the failure reason.
+
+A failed verification is not persisted, so the next apply retries automatically.
 
 ## Example Usage
 
@@ -16,6 +22,8 @@ resource "resend_domain_claim" "takeover" {
   name = "automated.appcompany.com"
 }
 
+# Trigger the claim's TXT record check. Default behaviour: the check runs
+# once and the apply moves on; the status settles via refresh.
 resource "resend_domain_claim_verification" "takeover" {
   domain_id = resend_domain_claim.takeover.domain_id
 
@@ -24,9 +32,11 @@ resource "resend_domain_claim_verification" "takeover" {
   #
   # depends_on = [cloudflare_record.claim_txt]
 
-  timeouts = {
-    create = "10m"
-  }
+  # Strict variant: block until the claim verifies, at most 10m.
+  #   wait_until_verified = true
+  #   timeouts = {
+  #     create = "10m"
+  #   }
 }
 ```
 
@@ -40,12 +50,13 @@ resource "resend_domain_claim_verification" "takeover" {
 ### Optional
 
 - `timeouts` (Attributes) (see [below for nested schema](#nestedatt--timeouts))
+- `wait_until_verified` (Boolean) Wait (poll) until the claim reaches verified/completed before apply completes. Default false: verification is triggered once and the resource is created with the current status; it converges via refresh. Changing this forces re-running verification.
 
 ### Read-Only
 
 - `blocked_reason` (String) Why the claim is blocked (e.g. grace_period), when applicable.
 - `failure_reason` (String) Why the claim failed, when applicable.
-- `status` (String) Claim status after verification: verified (ownership transfer queued) or completed (transfer done).
+- `status` (String) Current claim status at last trigger/refresh: pending, verified, completed, blocked, failed, expired, superseded or canceled. With wait_until_verified = true the create only completes on verified/completed.
 
 <a id="nestedatt--timeouts"></a>
 ### Nested Schema for `timeouts`

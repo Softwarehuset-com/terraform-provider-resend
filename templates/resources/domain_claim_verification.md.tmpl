@@ -2,12 +2,18 @@
 subcategory: ""
 page_title: "Resend: resend_domain_claim_verification"
 description: |-
-  Triggers verification of a Resend domain claim and waits until the TXT record check passes (status verified or completed). Publish the claim's TXT record first and point depends_on at the DNS resources so they exist before verification runs. A failed verification is not persisted, so the next apply retries automatically.
+  Triggers the TXT record check for a Resend domain claim. By default it returns immediately with the current status, so applies stay green while DNS propagates. Set `wait_until_verified = true` to block until the claim is verified. Publish the claim's TXT record first.
 ---
 
 # resend_domain_claim_verification
 
-Triggers claim verification and polls until it passes.
+Triggers verification of a Resend domain claim (`resend_domain_claim`).
+
+By default (`wait_until_verified = false`) the resource triggers the TXT record check once, records the current status, and returns. The status settles via refresh; nothing blocks the apply.
+
+With `wait_until_verified = true` the create blocks until the claim reaches `verified` or `completed`, bounded by `timeouts.create` (default 10m). While waiting, the provider re-triggers the check every 60 seconds, since Resend re-examines the TXT record only when verification is triggered. Blocked claims surface their reason (for example `grace_period` while the previous owner's window runs); failed ones surface the failure reason.
+
+A failed verification is not persisted, so the next apply retries automatically.
 
 ## Example Usage
 

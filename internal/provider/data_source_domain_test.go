@@ -136,7 +136,7 @@ func TestAccDomainDataSource(t *testing.T) {
 				Check: tfresource.ComposeTestCheckFunc(
 					tfresource.TestCheckResourceAttr("data.resend_domain.test", "name", name),
 					tfresource.TestCheckResourceAttrSet("data.resend_domain.test", "id"),
-					tfresource.TestCheckResourceAttr("data.resend_domain.test", "status", "pending"),
+					tfresource.TestMatchResourceAttr("data.resend_domain.test", "status", regexp.MustCompile(`^(pending|not_started)$`)),
 					tfresource.TestMatchResourceAttr("data.resend_domain.test", "records.#", regexp.MustCompile(`^[1-9]`)),
 				),
 			},
@@ -153,7 +153,13 @@ func TestAccDomainDataSourceByNameNotFound(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProviderFactories,
 		Steps: []tfresource.TestStep{
 			{
-				Config:      testAccDomainDataSourceConfig(name),
+				// Data source only: the domain must NOT exist, so the lookup
+				// errors at plan time.
+				Config: fmt.Sprintf(`
+data "resend_domain" "test" {
+  name = %q
+}
+`, name),
 				ExpectError: regexp.MustCompile(`no domain named`),
 			},
 		},

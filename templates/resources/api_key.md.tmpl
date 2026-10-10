@@ -1,0 +1,26 @@
+---
+subcategory: ""
+page_title: "Resend: resend_api_key"
+description: |-
+  Manages a Resend API key. The `token` attribute is returned only when the key is created and is never shown again; import leaves it null. Destroying the resource deletes the key. If the key is deleted outside Terraform the next plan recreates it with a new token.
+---
+
+# resend_api_key
+
+Manages a Resend API key.
+
+## Example Usage
+
+{{ codefile "terraform" .ExampleFile }}
+
+{{ .SchemaMarkdown }}
+
+## Import
+
+Import is supported using the following syntax:
+
+```shell
+terraform import resend_api_key.ci <api-key-id>
+```
+
+The token cannot be recovered on import (Resend never returns it again), and `permission` is not returned by the API either; both stay null until the key is recreated.

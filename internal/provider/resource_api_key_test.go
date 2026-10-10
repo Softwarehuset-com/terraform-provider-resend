@@ -224,7 +224,7 @@ func TestAccApiKeyBasic(t *testing.T) {
 				ResourceName:            "resend_api_key.test",
 				ImportState:             true,
 				ImportStateVerify:       true,
-				ImportStateVerifyIgnore: []string{"token", "last_used_at"},
+				ImportStateVerifyIgnore: []string{"token", "permission", "last_used_at"},
 			},
 		},
 	})

@@ -19,6 +19,6 @@ vet:
 	go vet ./...
 
 docs:
-	go run github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs@latest generate
+	go run github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs@latest generate --provider-name resend
 
 .PHONY: default build fmt fmt-check test testacc vet docs

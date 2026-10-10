@@ -87,6 +87,7 @@ func (p *resendProvider) Resources(ctx context.Context) []func() resource.Resour
 		NewDomainResource,
 		NewDomainVerificationResource,
 		NewWebhookResource,
+		NewApiKeyResource,
 	}
 }
 

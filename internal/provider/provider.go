@@ -80,6 +80,7 @@ func (p *resendProvider) Configure(ctx context.Context, req provider.ConfigureRe
 
 	client := NewResendClient(apiKey, baseURL)
 	resp.ResourceData = client
+	resp.DataSourceData = client
 }
 
 func (p *resendProvider) Resources(ctx context.Context) []func() resource.Resource {

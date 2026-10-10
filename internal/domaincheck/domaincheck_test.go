@@ -3,6 +3,7 @@ package domaincheck
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -135,5 +136,82 @@ func TestIsGone(t *testing.T) {
 	}
 	if IsGone(nil) {
 		t.Error("nil is not gone")
+	}
+}
+
+// --- domain claim polling ---
+
+type fakeClaimGetter struct {
+	calls  int
+	states []resend.DomainClaim
+	err    error
+}
+
+func (f *fakeClaimGetter) GetWithContext(_ context.Context, _ string) (resend.DomainClaim, error) {
+	defer func() { f.calls++ }()
+	if f.err != nil {
+		return resend.DomainClaim{}, f.err
+	}
+	if f.calls >= len(f.states) {
+		return f.states[len(f.states)-1], nil
+	}
+	return f.states[f.calls], nil
+}
+
+func noopSleep(context.Context, time.Duration) error { return nil }
+
+func TestWaitForClaimVerified(t *testing.T) {
+	pending := resend.DomainClaim{Status: resend.DomainClaimStatusPending, DomainId: "d-1"}
+	verified := resend.DomainClaim{Status: resend.DomainClaimStatusVerified, DomainId: "d-1"}
+
+	g := &fakeClaimGetter{states: []resend.DomainClaim{pending, pending, verified}}
+	got, err := WaitForClaimVerified(context.Background(), g, "d-1", time.Second, time.Minute, noopSleep)
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if got.Status != resend.DomainClaimStatusVerified {
+		t.Errorf("expected verified, got %q", got.Status)
+	}
+	if g.calls != 3 {
+		t.Errorf("expected 3 polls, got %d", g.calls)
+	}
+}
+
+func TestWaitForClaimVerifiedCompletedAlsoSucceeds(t *testing.T) {
+	g := &fakeClaimGetter{states: []resend.DomainClaim{
+		{Status: resend.DomainClaimStatusCompleted, DomainId: "d-1"},
+	}}
+	if _, err := WaitForClaimVerified(context.Background(), g, "d-1", time.Second, time.Minute, noopSleep); err != nil {
+		t.Fatalf("completed should be a success state, got %v", err)
+	}
+}
+
+func TestWaitForClaimVerifiedBlockedSurfacesReason(t *testing.T) {
+	g := &fakeClaimGetter{states: []resend.DomainClaim{
+		{Status: resend.DomainClaimStatusBlocked, BlockedReason: resend.DomainClaimBlockedReasonGracePeriod},
+	}}
+	_, err := WaitForClaimVerified(context.Background(), g, "d-1", time.Second, time.Minute, noopSleep)
+	if err == nil || !strings.Contains(err.Error(), "grace_period") {
+		t.Fatalf("expected blocked error mentioning grace_period, got %v", err)
+	}
+}
+
+func TestWaitForClaimVerifiedFailedSurfacesReason(t *testing.T) {
+	g := &fakeClaimGetter{states: []resend.DomainClaim{
+		{Status: resend.DomainClaimStatusFailed, FailureReason: "TXT record mismatch"},
+	}}
+	_, err := WaitForClaimVerified(context.Background(), g, "d-1", time.Second, time.Minute, noopSleep)
+	if err == nil || !strings.Contains(err.Error(), "TXT record mismatch") {
+		t.Fatalf("expected failure reason surfaced, got %v", err)
+	}
+}
+
+func TestWaitForClaimVerifiedTimeout(t *testing.T) {
+	g := &fakeClaimGetter{states: []resend.DomainClaim{
+		{Status: resend.DomainClaimStatusPending},
+	}}
+	_, err := WaitForClaimVerified(context.Background(), g, "d-1", time.Second, 0, noopSleep)
+	if err == nil || !strings.Contains(err.Error(), "not verified before timeout") {
+		t.Fatalf("expected timeout error, got %v", err)
 	}
 }

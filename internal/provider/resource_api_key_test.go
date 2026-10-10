@@ -2,8 +2,12 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,7 +16,9 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
+	tfsdk "github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	tfresource "github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	resend "github.com/resend/resend-go/v4"
 )
@@ -243,3 +249,63 @@ resource "resend_api_key" "test" {
 }
 
 func strPtr(s string) *string { return &s }
+
+// TestApiKeyCreateSurvivesSlowList pins the CI failure "Provider returned
+// invalid result object after apply": if the post-create List refresh does
+// not yet contain the key (eventual consistency), computed attributes must
+// be normalized to null instead of leaking unknown values into state.
+func TestApiKeyCreateSurvivesSlowList(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/api-keys"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "key-1", "token": "re_secret"})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api-keys"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	r := &apiKeyResource{client: NewResendClient("re_test", srv.URL)}
+	sch := apiKeySchema(t)
+	objType := sch.Type().TerraformType(context.Background()).(tftypes.Object)
+	attrTypes := objType.AttributeTypes
+
+	raw := map[string]tftypes.Value{
+		"name":         tftypes.NewValue(attrTypes["name"], "ci"),
+		"token":        tftypes.NewValue(attrTypes["token"], tftypes.UnknownValue),
+		"id":           tftypes.NewValue(attrTypes["id"], tftypes.UnknownValue),
+		"created_at":   tftypes.NewValue(attrTypes["created_at"], tftypes.UnknownValue),
+		"last_used_at": tftypes.NewValue(attrTypes["last_used_at"], tftypes.UnknownValue),
+	}
+	for _, a := range []string{"permission", "domain_id"} {
+		raw[a] = tftypes.NewValue(attrTypes[a], nil)
+	}
+
+	req := resource.CreateRequest{
+		Plan: tfsdk.Plan{Raw: tftypes.NewValue(objType, raw), Schema: sch},
+	}
+	resp := resource.CreateResponse{
+		State: tfsdk.State{Raw: tftypes.NewValue(objType, tftypes.UnknownValue), Schema: sch},
+	}
+	r.Create(context.Background(), req, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("create should succeed despite slow list: %v", resp.Diagnostics)
+	}
+	var state apiKeyResourceModel
+	if diags := resp.State.Get(context.Background(), &state); diags.HasError() {
+		t.Fatalf("reading back state: %v", diags)
+	}
+	if state.Token.ValueString() != "re_secret" {
+		t.Errorf("token must survive refresh miss, got %q", state.Token.ValueString())
+	}
+	if state.CreatedAt.IsUnknown() {
+		t.Error("created_at must not leak unknown into final state when list misses the key")
+	}
+	if state.LastUsedAt.IsUnknown() {
+		t.Error("last_used_at must not leak unknown into final state")
+	}
+}

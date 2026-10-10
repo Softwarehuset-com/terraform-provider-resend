@@ -133,10 +133,20 @@ func (r *apiKeyResource) Create(ctx context.Context, req resource.CreateRequest,
 
 	// Persist state as soon as the remote object exists so a later failure
 	// cannot orphan it. Refresh is best-effort and never sees the token.
-	if key, rerr := r.find(ctx, created.Id); rerr != nil {
+	key, rerr := r.find(ctx, created.Id)
+	if rerr != nil {
 		resp.Diagnostics.AddWarning("refreshing api key after create", rerr.Error())
 	} else if key != nil {
 		mapApiKeyToState(&plan, key)
+	}
+	// Eventual consistency: if the refresh miss leaves computed attributes
+	// unknown, normalize them to null — unknown values are invalid in final
+	// state ("Provider returned invalid result object after apply").
+	if plan.CreatedAt.IsUnknown() {
+		plan.CreatedAt = types.StringNull()
+	}
+	if plan.LastUsedAt.IsUnknown() {
+		plan.LastUsedAt = types.StringNull()
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }

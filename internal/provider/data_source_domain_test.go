@@ -162,8 +162,12 @@ func TestAccDomainDataSourceByNameNotFound(t *testing.T) {
 
 func testAccDomainDataSourceConfig(name string) string {
 	return fmt.Sprintf(`
-data "resend_domain" "test" {
+resource "resend_domain" "test" {
   name = %q
+}
+
+data "resend_domain" "test" {
+  name = resend_domain.test.name
 }
 `, name)
 }

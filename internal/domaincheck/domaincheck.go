@@ -27,11 +27,27 @@ type Getter interface {
 	GetWithContext(ctx context.Context, domainId string) (resend.Domain, error)
 }
 
+// Verifier is the subset of the resend-go domains service that can
+// (re-)trigger a DNS re-check. Resend only re-checks a domain's DNS records
+// when the verify endpoint is called, so the poller re-triggers on a cadence
+// while a domain stays pending. *resend.DomainsSvcImpl satisfies it via
+// client.Domains.
+type Verifier interface {
+	VerifyWithContext(ctx context.Context, domainId string) (bool, error)
+}
+
 // ClaimGetter is the subset of the resend-go domain claims service the
 // claim poller needs. *resend.DomainClaimsSvcImpl satisfies it via
 // client.DomainClaims.
 type ClaimGetter interface {
 	GetWithContext(ctx context.Context, domainId string) (resend.DomainClaim, error)
+}
+
+// ClaimVerifier is the subset of the resend-go domain claims service that
+// can (re-)trigger the claim TXT-record check. *resend.DomainClaimsSvcImpl
+// satisfies it via client.DomainClaims.
+type ClaimVerifier interface {
+	VerifyWithContext(ctx context.Context, domainID string) (resend.DomainClaim, error)
 }
 
 // ErrClaimNotVerified is returned when the timeout elapses before a domain
@@ -41,12 +57,16 @@ var ErrClaimNotVerified = errors.New("domain claim not verified before timeout")
 // WaitForClaimVerified polls a domain claim until it reaches verified or
 // completed, a terminal failure state, or the timeout elapses. Failure
 // states surface their blocked/failure reason in the error message.
-func WaitForClaimVerified(ctx context.Context, c ClaimGetter, domainID string, tick, timeout time.Duration, sleep func(context.Context, time.Duration) error) (resend.DomainClaim, error) {
+// reverifyEvery re-triggers the claim verification on a cadence while the
+// claim stays pending (Resend only re-checks the TXT record when verify is
+// called); <= 0 disables re-triggering.
+func WaitForClaimVerified(ctx context.Context, c ClaimGetter, v ClaimVerifier, domainID string, tick, timeout, reverifyEvery time.Duration, sleep func(context.Context, time.Duration) error) (resend.DomainClaim, error) {
 	deadline := time.Now().Add(timeout)
 	interval := tick
 	if interval > time.Minute {
 		interval = time.Minute
 	}
+	nextReverify := time.Now().Add(reverifyEvery)
 
 	for {
 		claim, err := c.GetWithContext(ctx, domainID)
@@ -69,6 +89,13 @@ func WaitForClaimVerified(ctx context.Context, c ClaimGetter, domainID string, t
 			return claim, ErrClaimNotVerified
 		}
 
+		if reverifyEvery > 0 && !time.Now().Before(nextReverify) {
+			if _, err := v.VerifyWithContext(ctx, domainID); err != nil {
+				return claim, fmt.Errorf("re-triggering claim verification: %w", err)
+			}
+			nextReverify = time.Now().Add(reverifyEvery)
+		}
+
 		if err := sleep(ctx, interval); err != nil {
 			return claim, fmt.Errorf("waiting for domain claim verification: %w", err)
 		}
@@ -81,13 +108,16 @@ func WaitForClaimVerified(ctx context.Context, c ClaimGetter, domainID string, t
 // WaitForVerified polls the domain until verification reaches a terminal
 // status, the timeout elapses, or ctx is cancelled. tick is the initial poll
 // interval (it grows up to a minute); sleep is injected so tests run without
-// real delays.
-func WaitForVerified(ctx context.Context, g Getter, domainID string, tick, timeout time.Duration, sleep func(context.Context, time.Duration) error) (resend.Domain, error) {
+// real delays. reverifyEvery re-triggers the verify endpoint on a cadence
+// while the domain stays pending (Resend only re-checks DNS when verify is
+// called); <= 0 disables re-triggering.
+func WaitForVerified(ctx context.Context, g Getter, v Verifier, domainID string, tick, timeout, reverifyEvery time.Duration, sleep func(context.Context, time.Duration) error) (resend.Domain, error) {
 	deadline := time.Now().Add(timeout)
 	interval := tick
 	if interval > time.Minute {
 		interval = time.Minute
 	}
+	nextReverify := time.Now().Add(reverifyEvery)
 
 	for {
 		dom, err := g.GetWithContext(ctx, domainID)
@@ -104,6 +134,13 @@ func WaitForVerified(ctx context.Context, g Getter, domainID string, tick, timeo
 
 		if time.Now().After(deadline) {
 			return dom, fmt.Errorf("%w: %s", ErrNotVerified, strings.Join(FailingRecords(dom), "; "))
+		}
+
+		if reverifyEvery > 0 && !time.Now().Before(nextReverify) {
+			if _, err := v.VerifyWithContext(ctx, domainID); err != nil {
+				return dom, fmt.Errorf("re-triggering verification: %w", err)
+			}
+			nextReverify = time.Now().Add(reverifyEvery)
 		}
 
 		if err := sleep(ctx, interval); err != nil {

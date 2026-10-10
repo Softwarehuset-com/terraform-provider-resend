@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-10-10
+
+### Breaking
+
+- `resend_domain_verification` and `resend_domain_claim_verification` no longer wait for verification by default. New `wait_until_verified` argument (default `false`) triggers the DNS check once and returns with the current status; applies stay green while DNS propagates, and the status settles to `verified` via refresh. Set `wait_until_verified = true` for the previous blocking behaviour (create timeout applies: 30m for domains, 10m for claims). Configurations that relied on the apply failing on unverified domains must set it explicitly.
+
+### Added
+
+- `resend_domains` data source: lists every domain in the account with full DNS records (same element shape as the `resend_domain` data source). The list endpoint omits records, so each domain is fetched individually after listing.
+
+### Changed
+
+- While waiting (`wait_until_verified = true`), both verification resources re-trigger Resend's verify endpoint every 60 seconds instead of only once at create. Resend re-checks DNS records only when verify is called, so a single early check could leave the status at `pending` for the entire timeout even though the records were correct.
+
 ## [1.1.0] - 2026-10-10
 
 ### Added

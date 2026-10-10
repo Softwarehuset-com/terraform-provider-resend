@@ -1,0 +1,28 @@
+---
+subcategory: ""
+page_title: "Resend: resend_domains (Data Source)"
+description: |-
+  Reads every Resend domain in the account, each with its full DNS records. Filter in HCL instead of in the data source.
+---
+
+# resend_domains (Data Source)
+
+Lists all domains in the account.
+
+Each element carries the same attributes as the `resend_domain` data source, records included, so DNS wiring works the same way for one domain and for all of them.
+
+Resend's list endpoint omits records, so after listing, every domain is fetched individually. One extra request per domain: negligible for a typical account, worth knowing about if you have hundreds. Listing is paginated (100 pages max).
+
+There are no filter arguments on purpose. Filtering in HCL is one line and always up to date with what you need right now:
+
+```terraform
+locals {
+  verified = [for d in data.resend_domains.all.domains : d if d.status == "verified"]
+}
+```
+
+## Example Usage
+
+{{ codefile "terraform" .ExampleFile }}
+
+{{ .SchemaMarkdown }}

@@ -45,52 +45,65 @@ func (d *domainDataSource) Metadata(_ context.Context, req datasource.MetadataRe
 }
 
 func (d *domainDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
+	attrs := domainComputedOutputAttributes()
+	attrs["id"] = datasourceschema.StringAttribute{
+		Optional:    true,
+		Computed:    true,
+		Description: "Resend domain id to look up. Exactly one of id or name must be set.",
+	}
+	attrs["name"] = datasourceschema.StringAttribute{
+		Optional:    true,
+		Computed:    true,
+		Description: "Domain name to look up (exact match). Exactly one of id or name must be set.",
+		Validators: []validator.String{
+			// Declared once: ExactlyOneOf evaluates the whole
+			// (name, id) set regardless of which side is configured.
+			stringvalidator.ExactlyOneOf(path.MatchRoot("id")),
+		},
+	}
+	attrs["records"] = domainRecordsAttribute()
 	resp.Schema = datasourceschema.Schema{
 		Description: "Reads an existing Resend domain by id or name (exactly one), including its DNS records — e.g. to wire records into a DNS provider for a domain managed outside this stack.",
-		Attributes: map[string]datasourceschema.Attribute{
-			"id": datasourceschema.StringAttribute{
-				Optional:    true,
-				Computed:    true,
-				Description: "Resend domain id to look up. Exactly one of id or name must be set.",
+		Attributes:  attrs,
+	}
+}
+
+// domainComputedOutputAttributes returns the computed domain outputs shared
+// by the resend_domain and resend_domains data sources (everything except
+// id, name and records, which differ between them).
+func domainComputedOutputAttributes() map[string]datasourceschema.Attribute {
+	return map[string]datasourceschema.Attribute{
+		"status":             datasourceschema.StringAttribute{Computed: true, Description: "Domain status: pending, verified, partially_verified, not_started or failed."},
+		"region":             datasourceschema.StringAttribute{Computed: true, Description: "Region the domain is hosted in."},
+		"created_at":         datasourceschema.StringAttribute{Computed: true, Description: "Creation timestamp."},
+		"tracking_subdomain": datasourceschema.StringAttribute{Computed: true, Description: "Subdomain used for open tracking links."},
+		"open_tracking":      datasourceschema.BoolAttribute{Computed: true, Description: "Whether open tracking is enabled."},
+		"click_tracking":     datasourceschema.BoolAttribute{Computed: true, Description: "Whether click tracking is enabled."},
+		"capabilities": datasourceschema.SingleNestedAttribute{
+			Computed:    true,
+			Description: "Sending/receiving capabilities.",
+			Attributes: map[string]datasourceschema.Attribute{
+				"sending":   datasourceschema.StringAttribute{Computed: true, Description: "Sending capability: enabled or disabled."},
+				"receiving": datasourceschema.StringAttribute{Computed: true, Description: "Receiving (inbound email) capability: enabled or disabled."},
 			},
-			"name": datasourceschema.StringAttribute{
-				Optional:    true,
-				Computed:    true,
-				Description: "Domain name to look up (exact match). Exactly one of id or name must be set.",
-				Validators: []validator.String{
-					// Declared once: ExactlyOneOf evaluates the whole
-					// (name, id) set regardless of which side is configured.
-					stringvalidator.ExactlyOneOf(path.MatchRoot("id")),
-				},
-			},
-			"status":             datasourceschema.StringAttribute{Computed: true, Description: "Domain status: pending, verified, partially_verified, not_started or failed."},
-			"region":             datasourceschema.StringAttribute{Computed: true, Description: "Region the domain is hosted in."},
-			"created_at":         datasourceschema.StringAttribute{Computed: true, Description: "Creation timestamp."},
-			"tracking_subdomain": datasourceschema.StringAttribute{Computed: true, Description: "Subdomain used for open tracking links."},
-			"open_tracking":      datasourceschema.BoolAttribute{Computed: true, Description: "Whether open tracking is enabled."},
-			"click_tracking":     datasourceschema.BoolAttribute{Computed: true, Description: "Whether click tracking is enabled."},
-			"capabilities": datasourceschema.SingleNestedAttribute{
-				Computed:    true,
-				Description: "Sending/receiving capabilities.",
-				Attributes: map[string]datasourceschema.Attribute{
-					"sending":   datasourceschema.StringAttribute{Computed: true, Description: "Sending capability: enabled or disabled."},
-					"receiving": datasourceschema.StringAttribute{Computed: true, Description: "Receiving (inbound email) capability: enabled or disabled."},
-				},
-			},
-			"records": datasourceschema.ListNestedAttribute{
-				Computed:    true,
-				Description: "DNS records Resend requires for this domain, including inbound MX records when receiving is enabled. Same shape as resend_domain.records.",
-				NestedObject: datasourceschema.NestedAttributeObject{
-					Attributes: map[string]datasourceschema.Attribute{
-						"record":   datasourceschema.StringAttribute{Computed: true, Description: "Record purpose: DKIM, SPF, MX or Tracking."},
-						"name":     datasourceschema.StringAttribute{Computed: true, Description: "Record name relative to the domain."},
-						"type":     datasourceschema.StringAttribute{Computed: true, Description: "DNS type: TXT, MX or CNAME."},
-						"ttl":      datasourceschema.StringAttribute{Computed: true, Description: "TTL (usually Auto)."},
-						"status":   datasourceschema.StringAttribute{Computed: true, Description: "Verification status of this record."},
-						"value":    datasourceschema.StringAttribute{Computed: true, Description: "Record value to publish."},
-						"priority": datasourceschema.NumberAttribute{Computed: true, Description: "MX priority when type is MX, null otherwise."},
-					},
-				},
+		},
+	}
+}
+
+// domainRecordsAttribute returns the shared DNS records list attribute.
+func domainRecordsAttribute() datasourceschema.ListNestedAttribute {
+	return datasourceschema.ListNestedAttribute{
+		Computed:    true,
+		Description: "DNS records Resend requires for this domain, including inbound MX records when receiving is enabled. Same shape as resend_domain.records.",
+		NestedObject: datasourceschema.NestedAttributeObject{
+			Attributes: map[string]datasourceschema.Attribute{
+				"record":   datasourceschema.StringAttribute{Computed: true, Description: "Record purpose: DKIM, SPF, MX or Tracking."},
+				"name":     datasourceschema.StringAttribute{Computed: true, Description: "Record name relative to the domain."},
+				"type":     datasourceschema.StringAttribute{Computed: true, Description: "DNS type: TXT, MX or CNAME."},
+				"ttl":      datasourceschema.StringAttribute{Computed: true, Description: "TTL (usually Auto)."},
+				"status":   datasourceschema.StringAttribute{Computed: true, Description: "Verification status of this record."},
+				"value":    datasourceschema.StringAttribute{Computed: true, Description: "Record value to publish."},
+				"priority": datasourceschema.NumberAttribute{Computed: true, Description: "MX priority when type is MX, null otherwise."},
 			},
 		},
 	}

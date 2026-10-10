@@ -7,7 +7,7 @@ description: |-
 
 # Resend Provider
 
-Manage [Resend](https://resend.com) domains, domain verification, API keys, domain claims and webhooks with Terraform. Existing domains can be read with the `resend_domain` data source (by id or name) to wire their DNS records into any DNS provider, and domains verified under another Resend account can be taken over via the `resend_domain_claim` + `resend_domain_claim_verification` pair.
+Manage [Resend](https://resend.com) domains, domain verification, API keys, domain claims and webhooks with Terraform. Existing domains can be read with the `resend_domain` data source (by id or name) or all of them at once with `resend_domains`, to wire their DNS records into any DNS provider. Domains verified under another Resend account can be taken over via the `resend_domain_claim` + `resend_domain_claim_verification` pair.
 
 The flagship use case is inbound email: register a domain with the `receiving` capability, publish the returned DNS records (including MX), verify the domain, and subscribe an `email.received` webhook so inbound mail is POSTed to your HTTP endpoint.
 
@@ -31,4 +31,6 @@ API keys are created in the [Resend dashboard](https://resend.com/dashboard/api-
 ## Special Considerations
 
 - DNS records are outputs, not managed objects: `resend_domain.records` returns every record (DKIM, SPF, MX, tracking CNAME). Create them with your DNS provider (Cloudflare, Route53, ...) and point `resend_domain_verification`'s `depends_on` at those resources.
+- Verification does not block by default. `resend_domain_verification` and `resend_domain_claim_verification` trigger the DNS check once and return with the current status; set `wait_until_verified = true` to make the apply wait for `verified` (bounded by `timeouts.create`).
+- Resend re-checks DNS records only when its verify endpoint is called. While waiting, the provider re-triggers verify every 60 seconds. What it cannot fix: DNS caches a "record not found" answer (for 30 minutes on Cloudflare), so a check that ran before the record existed stays wrong until that cache expires. Register and verify in the same apply only if you can live with that window.
 - `resend_webhook.signing_secret` is only returned when the webhook is created or rotated; importing an existing webhook leaves it null. Rotate via the Resend dashboard or API if you need the value in state.

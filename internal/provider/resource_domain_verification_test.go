@@ -2,15 +2,19 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/defaults"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	tfresource "github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	resend "github.com/resend/resend-go/v4"
@@ -43,11 +47,12 @@ func (f *seqDomainGetter) GetWithContext(_ context.Context, _ string) (resend.Do
 
 type countingVerifier struct {
 	calls int
+	err   error
 }
 
 func (f *countingVerifier) VerifyWithContext(context.Context, string) (bool, error) {
 	f.calls++
-	return true, nil
+	return f.err == nil, f.err
 }
 
 func verificationSchema(t *testing.T) schema.Schema {
@@ -112,6 +117,100 @@ func defaultBoolValue(t *testing.T, attr schema.BoolAttribute) bool {
 	return resp.PlanValue.ValueBool()
 }
 
+// TestWaitUntilVerifiedReplaceSemantics pins the modifier behaviorally:
+// type-based checks cannot distinguish RequiresReplace from
+// RequiresReplaceIfConfigured (both wrap RequiresReplaceIf).
+func TestWaitUntilVerifiedReplaceSemantics(t *testing.T) {
+	cases := []struct {
+		name                string
+		config, state, plan types.Bool
+		wantReplace         bool
+	}{
+		{
+			// Imported and v1.x states carry null; the plan fills the
+			// default (false). Forcing replace here would churn every
+			// existing verification resource on upgrade.
+			name:        "null state with default-filled plan must not replace",
+			config:      types.BoolNull(),
+			state:       types.BoolNull(),
+			plan:        types.BoolValue(false),
+			wantReplace: false,
+		},
+		{
+			name:        "explicit toggle replaces",
+			config:      types.BoolValue(false),
+			state:       types.BoolValue(true),
+			plan:        types.BoolValue(false),
+			wantReplace: true,
+		},
+		{
+			name:        "unchanged explicit value does not replace",
+			config:      types.BoolValue(true),
+			state:       types.BoolValue(true),
+			plan:        types.BoolValue(true),
+			wantReplace: false,
+		},
+	}
+
+	for resName, s := range map[string]schema.Schema{
+		"resend_domain_verification":       verificationSchema(t),
+		"resend_domain_claim_verification": claimVerificationSchemaResp(t).Schema,
+	} {
+		attr, ok := s.Attributes["wait_until_verified"].(schema.BoolAttribute)
+		if !ok {
+			t.Fatalf("%s: wait_until_verified should be bool attribute, got %T", resName, s.Attributes["wait_until_verified"])
+		}
+
+		toWait := func(b types.Bool) interface{} {
+			if b.IsNull() {
+				return nil
+			}
+			return b.ValueBool()
+		}
+
+		for _, tc := range cases {
+			t.Run(resName+" / "+tc.name, func(t *testing.T) {
+				stateRaw := objectWithWait(t, s, toWait(tc.state))
+				planRaw := objectWithWait(t, s, toWait(tc.plan))
+
+				req := planmodifier.BoolRequest{
+					ConfigValue: tc.config,
+					StateValue:  tc.state,
+					PlanValue:   tc.plan,
+					State:       tfsdk.State{Raw: stateRaw, Schema: s},
+					Plan:        tfsdk.Plan{Raw: planRaw, Schema: s},
+				}
+				resp := &planmodifier.BoolResponse{}
+				for _, m := range attr.PlanModifiers {
+					m.PlanModifyBool(context.Background(), req, resp)
+				}
+				if resp.Diagnostics.HasError() {
+					t.Fatalf("modifier errored: %v", resp.Diagnostics)
+				}
+				if resp.RequiresReplace != tc.wantReplace {
+					t.Errorf("requiresReplace = %v, want %v", resp.RequiresReplace, tc.wantReplace)
+				}
+			})
+		}
+	}
+}
+
+// objectWithWait builds a schema-complete object with wait_until_verified
+// set (nil -> null) and domain_id filled, so State.Raw/Plan.Raw are
+// non-null for plan modifier tests.
+func objectWithWait(t *testing.T, s schema.Schema, wait interface{}) tftypes.Value {
+	t.Helper()
+	objType := s.Type().TerraformType(context.Background())
+	attrTypes := objType.(tftypes.Object).AttributeTypes
+	raw := map[string]tftypes.Value{}
+	for a, at := range attrTypes {
+		raw[a] = tftypes.NewValue(at, nil)
+	}
+	raw["wait_until_verified"] = tftypes.NewValue(tftypes.Bool, wait)
+	raw["domain_id"] = tftypes.NewValue(tftypes.String, "dom-1")
+	return tftypes.NewValue(objType, raw)
+}
+
 func TestDomainVerificationSchema(t *testing.T) {
 	s := verificationSchema(t)
 
@@ -122,6 +221,9 @@ func TestDomainVerificationSchema(t *testing.T) {
 	if !wait.Optional || !wait.Computed {
 		t.Error("wait_until_verified should be Optional+Computed")
 	}
+	// Modifier semantics pinned behaviorally in
+	// TestWaitUntilVerifiedReplaceSemantics (type checks cannot distinguish
+	// RequiresReplace from RequiresReplaceIfConfigured).
 	if defaultBoolValue(t, wait) {
 		t.Error("wait_until_verified must default to false (non-blocking verification)")
 	}
@@ -255,6 +357,98 @@ func TestDomainVerificationReadDropsPendingWhenWaiting(t *testing.T) {
 	}
 	if !resp.State.Raw.IsNull() {
 		t.Error("waiting verification should drop from state when pending")
+	}
+}
+
+// In-place updates (timeouts-only change, or removing an explicit
+// wait_until_verified) carry computed attributes as unknown in the plan;
+// final state must stay concrete or Terraform Core rejects the apply.
+func TestDomainVerificationUpdateCarriesStatus(t *testing.T) {
+	s := verificationSchema(t)
+	r := &domainVerificationResource{getter: &seqDomainGetter{statuses: []string{resend.DomainStatusVerified}}}
+
+	stateRaw := verificationValue(t, s, "dom-1", resend.DomainStatusVerified, true)
+	planRaw := verificationValue(t, s, "dom-1", tftypes.UnknownValue, false)
+
+	req := resource.UpdateRequest{
+		Plan:  tfsdk.Plan{Raw: planRaw, Schema: s},
+		State: tfsdk.State{Raw: stateRaw, Schema: s},
+	}
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: s}}
+
+	r.Update(context.Background(), req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("update should succeed: %v", resp.Diagnostics)
+	}
+	var model domainVerificationResourceModel
+	if diags := resp.State.Get(context.Background(), &model); diags.HasError() {
+		t.Fatalf("reading back state: %v", diags)
+	}
+	if model.Status.IsUnknown() || model.Status.IsNull() {
+		t.Fatal("status must be carried from state, not left unknown in final state")
+	}
+	if model.Status.ValueString() != resend.DomainStatusVerified {
+		t.Errorf("status should carry over as verified, got %q", model.Status.ValueString())
+	}
+	if model.WaitUntilVerified.ValueBool() {
+		t.Error("wait_until_verified should be false after removal")
+	}
+}
+
+// A failing verify trigger must fail the create even in non-wait mode —
+// silently recording a stale status would hide the API error.
+func TestDomainVerificationCreateDefaultVerifyTriggerFails(t *testing.T) {
+	s := verificationSchema(t)
+	v := &countingVerifier{err: errors.New("missing_permissions")}
+	r := &domainVerificationResource{
+		getter:   &seqDomainGetter{statuses: []string{resend.DomainStatusPending}},
+		verifier: v,
+		sleep:    func(context.Context, time.Duration) error { return nil },
+	}
+
+	plan := verificationValue(t, s, "dom-1", tftypes.UnknownValue, false)
+	req := resource.CreateRequest{Plan: tfsdk.Plan{Raw: plan, Schema: s}}
+	resp := &resource.CreateResponse{State: tfsdk.State{Schema: s}}
+
+	r.Create(context.Background(), req, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("create must fail when the verify trigger fails")
+	}
+	var msg strings.Builder
+	for _, d := range resp.Diagnostics {
+		msg.WriteString(d.Summary() + " " + d.Detail() + " ")
+	}
+	if !strings.Contains(msg.String(), "missing_permissions") {
+		t.Errorf("error should surface the API cause, got: %s", msg.String())
+	}
+}
+
+// Non-wait Read keeps the resource for every non-verified status; only
+// strict mode drops.
+func TestDomainVerificationReadKeepsAllStatusesWhenNotWaiting(t *testing.T) {
+	s := verificationSchema(t)
+
+	for _, status := range []string{
+		resend.DomainStatusPending,
+		resend.DomainStatusNotStarted,
+		resend.DomainStatusFailed,
+	} {
+		g := &seqDomainGetter{statuses: []string{status}}
+		r := &domainVerificationResource{getter: g}
+		raw := verificationValue(t, s, "dom-1", resend.DomainStatusVerified, false)
+		st := tfsdk.State{Raw: raw, Schema: s}
+		resp := &resource.ReadResponse{State: st}
+
+		r.Read(context.Background(), resource.ReadRequest{State: st}, resp)
+
+		if resp.Diagnostics.HasError() {
+			t.Fatalf("read for %q errored: %v", status, resp.Diagnostics)
+		}
+		if resp.State.Raw.IsNull() {
+			t.Errorf("non-waiting read must keep the resource for status %q", status)
+		}
 	}
 }
 

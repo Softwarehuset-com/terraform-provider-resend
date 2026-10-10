@@ -155,27 +155,84 @@ func TestDomainsDataSourceReadEmptyAccount(t *testing.T) {
 	}
 }
 
+// Endless has_more must error, not silently truncate: a partial list would
+// produce wrong downstream DNS wiring.
+func TestDomainsDataSourcePaginationCapErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{"id": "d-loop", "name": "loop.appcompany.com"}}, "has_more": true,
+		})
+	}))
+	defer srv.Close()
+
+	ds := &domainsDataSource{client: NewResendClient("re_test", srv.URL)}
+	sch, _ := domainsDataSourceSchema(t)
+	objType := sch.Type().TerraformType(context.Background())
+
+	raw := map[string]tftypes.Value{}
+	for attr, at := range objType.(tftypes.Object).AttributeTypes {
+		raw[attr] = tftypes.NewValue(at, nil)
+	}
+	req := datasource.ReadRequest{
+		Config: tfsdk.Config{Raw: tftypes.NewValue(objType, raw), Schema: sch},
+	}
+	resp := &datasource.ReadResponse{
+		State: tfsdk.State{Raw: tftypes.NewValue(objType, tftypes.UnknownValue), Schema: sch},
+	}
+	ds.Read(context.Background(), req, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("endless pagination must error instead of returning a partial list")
+	}
+	var msg strings.Builder
+	for _, d := range resp.Diagnostics {
+		msg.WriteString(d.Summary() + " " + d.Detail() + " ")
+	}
+	if !strings.Contains(msg.String(), "more than") {
+		t.Errorf("error should mention the page cap, got: %s", msg.String())
+	}
+}
+
 func TestAccDomainsDataSource(t *testing.T) {
 	testAccPreCheck(t)
 
 	name := fmt.Sprintf("tfacc-%d.%s", time.Now().UnixNano(), testAccDomainBase(t))
 
+	// Step 1 creates the domain; step 2 reads the list when the domain is
+	// already in the account, and verifies it is listed with records (the
+	// list endpoint omits records, so presence of records proves the
+	// per-domain fetch too).
 	tfresource.Test(t, tfresource.TestCase{
 		ProtoV6ProviderFactories: testAccProviderFactories,
 		Steps: []tfresource.TestStep{
 			{
-				Config: testAccDomainsDataSourceConfig(name),
+				Config: testAccDomainsDataSourceStep1(name),
+			},
+			{
+				Config: testAccDomainsDataSourceStep2(name),
 				Check: tfresource.ComposeTestCheckFunc(
-					tfresource.TestCheckResourceAttrSet("data.resend_domains.all", "domains.0.id"),
-					tfresource.TestMatchResourceAttr("data.resend_domains.all", "domains.#", regexp.MustCompile(`^[1-9][0-9]*$`)),
-					tfresource.TestMatchResourceAttr("data.resend_domains.all", "domains.0.records.#", regexp.MustCompile(`^[1-9][0-9]*$`)),
+					tfresource.TestCheckResourceAttr("terraform_data.found", "output", "1"),
+					tfresource.TestMatchResourceAttr("terraform_data.records", "output", regexp.MustCompile(`^[1-9][0-9]*$`)),
 				),
 			},
 		},
 	})
 }
 
-func testAccDomainsDataSourceConfig(name string) string {
+func testAccDomainsDataSourceStep1(name string) string {
+	return fmt.Sprintf(`
+resource "resend_domain" "test" {
+  name = %[1]q
+  capabilities = {
+    sending   = "enabled"
+    receiving = "enabled"
+  }
+}
+`, name)
+}
+
+func testAccDomainsDataSourceStep2(name string) string {
 	return fmt.Sprintf(`
 resource "resend_domain" "test" {
   name = %[1]q
@@ -186,5 +243,17 @@ resource "resend_domain" "test" {
 }
 
 data "resend_domains" "all" {}
+
+locals {
+  mine = [for d in data.resend_domains.all.domains : d if d.id == resend_domain.test.id]
+}
+
+resource "terraform_data" "found" {
+  input = length(local.mine)
+}
+
+resource "terraform_data" "records" {
+  input = length(local.mine) > 0 ? length(local.mine[0].records) : 0
+}
 `, name)
 }

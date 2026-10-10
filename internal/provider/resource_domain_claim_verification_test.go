@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 // verify calls and replays claim states.
 type fakeClaims struct {
 	states      []resend.DomainClaim
+	verifyErr   error
 	verifyCalls int
 	calls       int
 }
@@ -32,7 +34,7 @@ func (f *fakeClaims) GetWithContext(_ context.Context, _ string) (resend.DomainC
 
 func (f *fakeClaims) VerifyWithContext(_ context.Context, _ string) (resend.DomainClaim, error) {
 	f.verifyCalls++
-	return resend.DomainClaim{}, nil
+	return resend.DomainClaim{}, f.verifyErr
 }
 
 func claimVerificationSchemaResp(t *testing.T) *resource.SchemaResponse {
@@ -256,6 +258,47 @@ func TestDomainClaimVerificationCreateFailedSurfacesReason(t *testing.T) {
 	}, "TXT record mismatch")
 }
 
+// In-place updates carry computed attributes as unknown in the plan; all
+// three computed attributes must stay concrete in final state.
+func TestDomainClaimVerificationUpdateCarriesComputed(t *testing.T) {
+	s := claimVerificationSchemaResp(t).Schema
+	objType := s.Type().TerraformType(context.Background())
+	r := &domainClaimVerificationResource{
+		claims: &fakeClaims{states: []resend.DomainClaim{{Status: resend.DomainClaimStatusVerified}}},
+	}
+
+	stateRaw := claimVerificationRaw(objType, "dom-1", resend.DomainClaimStatusVerified, true)
+	planRaw := claimVerificationRaw(objType, "dom-1", tftypes.UnknownValue, false)
+
+	req := resource.UpdateRequest{
+		Plan:  tfsdk.Plan{Raw: tftypes.NewValue(objType, planRaw), Schema: s},
+		State: tfsdk.State{Raw: tftypes.NewValue(objType, stateRaw), Schema: s},
+	}
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: s}}
+
+	r.Update(context.Background(), req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("update should succeed: %v", resp.Diagnostics)
+	}
+	var model domainClaimVerificationResourceModel
+	if diags := resp.State.Get(context.Background(), &model); diags.HasError() {
+		t.Fatalf("reading back state: %v", diags)
+	}
+	if model.Status.IsUnknown() || model.Status.IsNull() {
+		t.Fatal("status must be carried from state, not left unknown in final state")
+	}
+	if model.BlockedReason.IsUnknown() || model.BlockedReason.IsNull() {
+		t.Fatal("blocked_reason must be concrete in final state")
+	}
+	if model.FailureReason.IsUnknown() || model.FailureReason.IsNull() {
+		t.Fatal("failure_reason must be concrete in final state")
+	}
+	if model.WaitUntilVerified.ValueBool() {
+		t.Error("wait_until_verified should be false after removal")
+	}
+}
+
 func TestDomainClaimVerificationReadSemantics(t *testing.T) {
 	s := claimVerificationSchemaResp(t).Schema
 	objType := s.Type().TerraformType(context.Background())
@@ -291,10 +334,41 @@ func TestDomainClaimVerificationReadSemantics(t *testing.T) {
 	for _, status := range []string{
 		resend.DomainClaimStatusPending,
 		resend.DomainClaimStatusBlocked,
+		resend.DomainClaimStatusFailed,
+		resend.DomainClaimStatusExpired,
+		resend.DomainClaimStatusSuperseded,
+		resend.DomainClaimStatusCanceled,
 	} {
 		if !run(status, false) {
 			t.Errorf("non-waiting: status %q should keep the resource in state", status)
 		}
+	}
+}
+
+// A failing verify trigger must fail the create even in non-wait mode —
+// silently recording a stale status would hide the API error.
+func TestDomainClaimVerificationCreateDefaultVerifyTriggerFails(t *testing.T) {
+	fake := &fakeClaims{
+		states:    []resend.DomainClaim{{Status: resend.DomainClaimStatusPending}},
+		verifyErr: errors.New("missing_permissions"),
+	}
+	r := &domainClaimVerificationResource{
+		claims: fake,
+		sleep:  func(context.Context, time.Duration) error { return nil },
+	}
+
+	req, resp := claimVerificationCreatePair(t, false)
+	r.Create(context.Background(), req, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("create must fail when the verify trigger fails")
+	}
+	var msg strings.Builder
+	for _, d := range resp.Diagnostics {
+		msg.WriteString(d.Summary() + " " + d.Detail() + " ")
+	}
+	if !strings.Contains(msg.String(), "missing_permissions") {
+		t.Errorf("error should surface the API cause, got: %s", msg.String())
 	}
 }
 

@@ -82,7 +82,10 @@ func (r *domainClaimVerificationResource) Schema(ctx context.Context, _ resource
 				Default:     booldefault.StaticBool(false),
 				Description: "Wait (poll) until the claim reaches verified/completed before apply completes. Default false: verification is triggered once and the resource is created with the current status; it converges via refresh. Changing this forces re-running verification.",
 				PlanModifiers: []planmodifier.Bool{
-					boolplanmodifier.RequiresReplace(),
+					// IfConfigured, not plain RequiresReplace: imported and
+					// pre-2.0 states carry null while the plan fills the
+					// default; null config must not force a replace.
+					boolplanmodifier.RequiresReplaceIfConfigured(),
 				},
 			},
 			"status": schema.StringAttribute{
@@ -221,12 +224,23 @@ func (r *domainClaimVerificationResource) Read(ctx context.Context, req resource
 }
 
 func (r *domainClaimVerificationResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	// No mutable attributes: domain_id and wait_until_verified changes
-	// replace the resource.
-	var plan domainClaimVerificationResourceModel
+	// domain_id and wait_until_verified changes force replacement; this
+	// path handles timeouts-only changes and removal of an explicit
+	// wait_until_verified. Computed attributes arrive unknown in the plan —
+	// carry them from state so final state stays concrete.
+	var plan, state domainClaimVerificationResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
+	}
+	plan.Status = state.Status
+	plan.BlockedReason = state.BlockedReason
+	plan.FailureReason = state.FailureReason
+	for _, v := range []*types.String{&plan.Status, &plan.BlockedReason, &plan.FailureReason} {
+		if v.IsUnknown() || v.IsNull() {
+			*v = types.StringValue("")
+		}
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }

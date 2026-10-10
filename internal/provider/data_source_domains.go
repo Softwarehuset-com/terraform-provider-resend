@@ -79,6 +79,7 @@ func (d *domainsDataSource) Read(ctx context.Context, req datasource.ReadRequest
 	// Page through the full list first.
 	var listed []resend.Domain
 	var after *string
+	capped := true
 	for page := 0; page < maxListPages; page++ {
 		list, err := d.client.Domains.ListWithOptions(ctx, &resend.ListOptions{After: after})
 		if err != nil {
@@ -87,10 +88,18 @@ func (d *domainsDataSource) Read(ctx context.Context, req datasource.ReadRequest
 		}
 		listed = append(listed, list.Data...)
 		if !list.HasMore || len(list.Data) == 0 {
+			capped = false
 			break
 		}
 		last := list.Data[len(list.Data)-1].Id
 		after = &last
+	}
+	if capped {
+		resp.Diagnostics.AddError(
+			"listing domains",
+			fmt.Sprintf("more than %d pages of domains; refusing to return a partial list", maxListPages),
+		)
+		return
 	}
 
 	// The List endpoint omits records; fetch each domain in full.

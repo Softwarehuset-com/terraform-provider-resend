@@ -11,7 +11,9 @@ Lists all domains in the account.
 
 Each element carries the same attributes as the `resend_domain` data source, records included, so DNS wiring works the same way for one domain and for all of them.
 
-Resend's list endpoint omits records, so after listing, every domain is fetched individually. One extra request per domain: negligible for a typical account, worth knowing about if you have hundreds. Listing is paginated (100 pages max).
+Resend's list endpoint omits records, so after listing, every domain is fetched individually. One extra request per domain: negligible for a typical account, worth knowing about if you have hundreds. Listing is paginated (100 pages max; more than that errors rather than returning a partial list).
+
+The list can also lag slightly behind creation: a domain created in the same apply may not appear when a data source reads during that apply's plan. Read it in a later apply, or point the data source's `depends_on` at the `resend_domain` so it reads during apply instead.
 
 There are no filter arguments on purpose. Filtering in HCL is one line and always up to date with what you need right now:
 

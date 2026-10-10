@@ -42,18 +42,21 @@ type domainCapabilitiesModel struct {
 // domainResourceModel uses types.List for records so the model can hold the
 // unknown value Terraform plans for computed collections at create time.
 type domainResourceModel struct {
-	Name              types.String             `tfsdk:"name"`
-	Region            types.String             `tfsdk:"region"`
-	CustomReturnPath  types.String             `tfsdk:"custom_return_path"`
-	Tls               types.String             `tfsdk:"tls"`
-	TrackingSubdomain types.String             `tfsdk:"tracking_subdomain"`
-	OpenTracking      types.Bool               `tfsdk:"open_tracking"`
-	ClickTracking     types.Bool               `tfsdk:"click_tracking"`
-	Capabilities      *domainCapabilitiesModel `tfsdk:"capabilities"`
-	ID                types.String             `tfsdk:"id"`
-	Status            types.String             `tfsdk:"status"`
-	CreatedAt         types.String             `tfsdk:"created_at"`
-	Records           types.List               `tfsdk:"records"`
+	Name              types.String `tfsdk:"name"`
+	Region            types.String `tfsdk:"region"`
+	CustomReturnPath  types.String `tfsdk:"custom_return_path"`
+	Tls               types.String `tfsdk:"tls"`
+	TrackingSubdomain types.String `tfsdk:"tracking_subdomain"`
+	OpenTracking      types.Bool   `tfsdk:"open_tracking"`
+	ClickTracking     types.Bool   `tfsdk:"click_tracking"`
+	// capabilities is Optional+Computed: an absent block is an UNKNOWN
+	// object at plan time, which only types.Object (not a struct pointer)
+	// can represent.
+	Capabilities types.Object `tfsdk:"capabilities"`
+	ID           types.String `tfsdk:"id"`
+	Status       types.String `tfsdk:"status"`
+	CreatedAt    types.String `tfsdk:"created_at"`
+	Records      types.List   `tfsdk:"records"`
 }
 
 // recordAttrTypes is the object type of a records element.
@@ -246,10 +249,13 @@ func (r *domainResource) Create(ctx context.Context, req resource.CreateRequest,
 		v := plan.ClickTracking.ValueBool()
 		createReq.ClickTracking = &v
 	}
-	if plan.Capabilities != nil {
-		caps := &resend.DomainCapabilities{
-			Sending:   plan.Capabilities.Sending.ValueString(),
-			Receiving: plan.Capabilities.Receiving.ValueString(),
+	if !plan.Capabilities.IsNull() && !plan.Capabilities.IsUnknown() {
+		caps := &resend.DomainCapabilities{}
+		if s, ok := plan.Capabilities.Attributes()["sending"].(types.String); ok {
+			caps.Sending = s.ValueString()
+		}
+		if s, ok := plan.Capabilities.Attributes()["receiving"].(types.String); ok {
+			caps.Receiving = s.ValueString()
 		}
 		createReq.Capabilities = caps
 	}
@@ -386,28 +392,46 @@ func mapDomainToState(model *domainResourceModel, dom resend.Domain) {
 	model.OpenTracking = types.BoolValue(dom.OpenTracking)
 	model.ClickTracking = types.BoolValue(dom.ClickTracking)
 	model.Records, _ = mapRecords(dom.Records)
-	model.Capabilities = mapDomainCapabilities(dom.Capabilities, model.Capabilities)
+	model.Capabilities = capabilitiesObjectFromAPI(dom.Capabilities, model.Capabilities)
 }
 
-// mapDomainCapabilities materializes API capabilities onto the model.
-// capabilities is Optional+Computed: values may legitimately be populated
-// from the API even when the config omitted the block (import/refresh), so
-// an existing model object is filled in place. A nil API value leaves the
-// model untouched. Shared by the resend_domain resource and data source.
-func mapDomainCapabilities(caps *resend.DomainCapabilities, model *domainCapabilitiesModel) *domainCapabilitiesModel {
+// capabilitiesAttrTypes mirrors the capabilities nested object schema.
+var capabilitiesAttrTypes = map[string]attr.Type{
+	"sending":   types.StringType,
+	"receiving": types.StringType,
+}
+
+// capabilitiesObjectFromAPI materializes API capabilities as a types.Object,
+// preserving values the model already holds when the API omits them. Used by
+// the resend_domain resource (types.Object model; the data source keeps its
+// struct model via mapDomainCapabilities).
+func capabilitiesObjectFromAPI(caps *resend.DomainCapabilities, existing types.Object) types.Object {
 	if caps == nil {
-		return model
+		return existing
 	}
-	if model == nil {
-		model = &domainCapabilitiesModel{}
+	vals := map[string]attr.Value{
+		"sending":   types.StringNull(),
+		"receiving": types.StringNull(),
+	}
+	if !existing.IsNull() && !existing.IsUnknown() {
+		if v, ok := existing.Attributes()["sending"].(types.String); ok && !v.IsNull() {
+			vals["sending"] = v
+		}
+		if v, ok := existing.Attributes()["receiving"].(types.String); ok && !v.IsNull() {
+			vals["receiving"] = v
+		}
 	}
 	if caps.Sending != "" {
-		model.Sending = types.StringValue(caps.Sending)
+		vals["sending"] = types.StringValue(caps.Sending)
 	}
 	if caps.Receiving != "" {
-		model.Receiving = types.StringValue(caps.Receiving)
+		vals["receiving"] = types.StringValue(caps.Receiving)
 	}
-	return model
+	obj, diags := types.ObjectValue(capabilitiesAttrTypes, vals)
+	if diags.HasError() {
+		return existing
+	}
+	return obj
 }
 
 // finalizeDomainState guarantees every computed attribute holds a known,
@@ -441,14 +465,33 @@ func finalizeDomainState(model *domainResourceModel) {
 	if model.Tls.IsUnknown() {
 		model.Tls = types.StringNull()
 	}
-	if model.Capabilities != nil {
-		if model.Capabilities.Sending.IsNull() || model.Capabilities.Sending.IsUnknown() {
-			model.Capabilities.Sending = types.StringValue(resend.DomainCapabilityStatusEnabled)
+	if model.Capabilities.IsNull() || model.Capabilities.IsUnknown() {
+		model.Capabilities = defaultCapabilitiesObject()
+	} else {
+		vals := model.Capabilities.Attributes()
+		if s, ok := vals["sending"].(types.String); !ok || s.IsNull() || s.IsUnknown() {
+			vals["sending"] = types.StringValue(resend.DomainCapabilityStatusEnabled)
 		}
-		if model.Capabilities.Receiving.IsNull() || model.Capabilities.Receiving.IsUnknown() {
-			model.Capabilities.Receiving = types.StringValue(resend.DomainCapabilityStatusDisabled)
+		if s, ok := vals["receiving"].(types.String); !ok || s.IsNull() || s.IsUnknown() {
+			vals["receiving"] = types.StringValue(resend.DomainCapabilityStatusDisabled)
+		}
+		if obj, diags := types.ObjectValue(capabilitiesAttrTypes, vals); !diags.HasError() {
+			model.Capabilities = obj
 		}
 	}
+}
+
+// defaultCapabilitiesObject returns documented API defaults for an omitted
+// capabilities block.
+func defaultCapabilitiesObject() types.Object {
+	obj, diags := types.ObjectValue(capabilitiesAttrTypes, map[string]attr.Value{
+		"sending":   types.StringValue(resend.DomainCapabilityStatusEnabled),
+		"receiving": types.StringValue(resend.DomainCapabilityStatusDisabled),
+	})
+	if diags.HasError() {
+		return types.ObjectNull(capabilitiesAttrTypes)
+	}
+	return obj
 }
 
 func mapRecords(records []resend.Record) (types.List, diag.Diagnostics) {

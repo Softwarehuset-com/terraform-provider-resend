@@ -13,7 +13,9 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	datasourceschema "github.com/hashicorp/terraform-plugin-framework/datasource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	tfsdk "github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	tfresource "github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	resend "github.com/resend/resend-go/v4"
@@ -44,10 +46,11 @@ func TestDomainDataSourceSchema(t *testing.T) {
 		if !attr.Optional || !attr.Computed {
 			t.Errorf("%s should be Optional+Computed (lookup input and output)", name)
 		}
-		// Exactly-one-of wiring: without validators on both, an
-		// id+name or empty config would silently misbehave.
-		if len(attr.Validators) == 0 {
-			t.Errorf("%s should carry exactly-one-of validator", name)
+		// Exactly-one-of wiring: declared once (on `name`), evaluating the
+		// whole (name, id) set; an id+name or empty config is rejected at
+		// validation time. Behavior pinned in TestDomainDataSourceExactlyOneOf.
+		if name, ok := s.Attributes["name"].(datasourceschema.StringAttribute); !ok || len(name.Validators) == 0 {
+			t.Error("name should carry the exactly-one-of validator")
 		}
 	}
 
@@ -242,5 +245,129 @@ func TestDomainDataSourceReadNamePathFetchesFullDomain(t *testing.T) {
 	}
 	if state.Records.IsNull() || len(state.Records.Elements()) != 1 {
 		t.Errorf("records must come from the full GET, got: %v", state.Records)
+	}
+}
+
+// TestDomainDataSourceNameLookupPaginates pins the review finding: domains
+// past the first page must be findable by name.
+func TestDomainDataSourceNameLookupPaginates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/domains/d-2") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "d-2", "name": "late.appcompany.com", "status": "verified", "region": "us-east-1"})
+			return
+		}
+		switch r.URL.Query().Get("after") {
+		case "":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{{"id": "d-1", "name": "early.appcompany.com"}}, "has_more": true,
+			})
+		case "d-1":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{{"id": "d-2", "name": "late.appcompany.com"}}, "has_more": false,
+			})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "has_more": false})
+		}
+	}))
+	defer srv.Close()
+
+	r := &domainDataSource{client: NewResendClient("re_test", srv.URL)}
+	sch := domainDataSourceSchema(t)
+	objType := sch.Type().TerraformType(context.Background())
+
+	raw := map[string]tftypes.Value{
+		"name": tftypes.NewValue(tftypes.String, "late.appcompany.com"),
+	}
+	for attr, at := range objType.(tftypes.Object).AttributeTypes {
+		if _, set := raw[attr]; !set {
+			raw[attr] = tftypes.NewValue(at, nil)
+		}
+	}
+	req := datasource.ReadRequest{
+		Config: tfsdk.Config{Raw: tftypes.NewValue(objType, raw), Schema: sch},
+	}
+	resp := &datasource.ReadResponse{
+		State: tfsdk.State{Raw: tftypes.NewValue(objType, tftypes.UnknownValue), Schema: sch},
+	}
+	r.Read(context.Background(), req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("read should succeed: %v", resp.Diagnostics)
+	}
+	var state domainDataSourceModel
+	if diags := resp.State.Get(context.Background(), &state); diags.HasError() {
+		t.Fatalf("reading back state: %v", diags)
+	}
+	if state.ID.ValueString() != "d-2" {
+		t.Errorf("page-2 domain must be found by name, got id %q", state.ID.ValueString())
+	}
+}
+
+// TestDomainDataSourceExactlyOneOf is the behavioral test for the lookup
+// validator: both-set and neither-set must fail, a single set side must
+// pass. Runs the validator actually wired into the schema against full
+// configs.
+func TestDomainDataSourceExactlyOneOf(t *testing.T) {
+	sch := domainDataSourceSchema(t)
+	objType := sch.Type().TerraformType(context.Background())
+
+	run := func(id, name interface{}) bool {
+		raw := map[string]tftypes.Value{}
+		for attr, at := range objType.(tftypes.Object).AttributeTypes {
+			var v interface{}
+			switch attr {
+			case "id":
+				v = id
+			case "name":
+				v = name
+			default:
+				v = nil
+			}
+			if v == tftypes.UnknownValue {
+				raw[attr] = tftypes.NewValue(at, tftypes.UnknownValue)
+			} else {
+				raw[attr] = tftypes.NewValue(at, v)
+			}
+		}
+		config := tfsdk.Config{Raw: tftypes.NewValue(objType, raw), Schema: sch}
+
+		hasErr := false
+		for _, attr := range []string{"id", "name"} {
+			val := id
+			if attr == "name" {
+				val = name
+			}
+			cv := types.StringNull()
+			if val != nil {
+				cv = types.StringValue(val.(string))
+			}
+			a := sch.Attributes[attr].(datasourceschema.StringAttribute)
+			req := validator.StringRequest{
+				ConfigValue: cv,
+				Config:      config,
+			}
+			for _, v := range a.Validators {
+				resp := &validator.StringResponse{}
+				v.ValidateString(context.Background(), req, resp)
+				if resp.Diagnostics.HasError() {
+					hasErr = true
+				}
+			}
+		}
+		return hasErr
+	}
+
+	if !run("d-1", "mail.appcompany.com") {
+		t.Error("both id and name set should fail validation")
+	}
+	if !run(nil, nil) {
+		t.Error("neither id nor name set should fail validation")
+	}
+	if run("d-1", nil) {
+		t.Error("id-only lookup should pass validation")
+	}
+	if run(nil, "mail.appcompany.com") {
+		t.Error("name-only lookup should pass validation")
 	}
 }

@@ -146,6 +146,13 @@ func TestMapDomainClaimToState(t *testing.T) {
 	if m2.BlockedReason.ValueString() != "grace_period" || m2.FailureReason.ValueString() != "nope" {
 		t.Errorf("reasons not mapped: %+v", m2)
 	}
+	// Region is request-only: reading the API's effective region back would
+	// forever-diff against a null config value.
+	m3 := &domainClaimResourceModel{Region: types.StringNull()}
+	mapDomainClaimToState(m3, resend.DomainClaim{Id: "c", Status: "pending", Region: "us-east-1"})
+	if !m3.Region.IsNull() {
+		t.Errorf("region must not be read back from the API, got %q", m3.Region.ValueString())
+	}
 }
 
 // TestDomainClaimCreateFast verifies the claim resource creates WITHOUT

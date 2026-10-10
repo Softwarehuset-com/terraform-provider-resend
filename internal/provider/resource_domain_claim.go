@@ -196,6 +196,13 @@ func (r *domainClaimResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
+	// Defensive: without a domain_id the claim Get would hit /domains//claim.
+	// Treat as gone (the next apply starts a fresh claim).
+	if state.DomainID.IsNull() || state.DomainID.IsUnknown() {
+		resp.State.RemoveResource(ctx)
+		return
+	}
+
 	claim, err := r.client.DomainClaims.GetWithContext(ctx, state.DomainID.ValueString())
 	if err != nil {
 		if domaincheck.IsGone(err) {
@@ -260,9 +267,9 @@ func mapDomainClaimToState(model *domainClaimResourceModel, claim resend.DomainC
 	if claim.Status != "" {
 		model.Status = types.StringValue(claim.Status)
 	}
-	if claim.Region != "" {
-		model.Region = types.StringValue(claim.Region)
-	}
+	// Region is request-only: the API materializes the effective region
+	// even when config omits it, and region is not Computed — reading it
+	// back would create a perpetual plan diff.
 	if claim.BlockedReason != "" {
 		model.BlockedReason = types.StringValue(claim.BlockedReason)
 	}

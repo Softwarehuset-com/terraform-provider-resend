@@ -52,7 +52,7 @@ data "resend_domain" "inbound" {
 - `open_tracking` (Boolean) Whether open tracking is enabled.
 - `records` (Attributes List) DNS records Resend requires for this domain, including inbound MX records when receiving is enabled. Same shape as resend_domain.records. (see [below for nested schema](#nestedatt--records))
 - `region` (String) Region the domain is hosted in.
-- `status` (String) Domain status: pending, verified, failed, not_started.
+- `status` (String) Domain status: pending, verified, partially_verified, not_started or failed.
 - `tracking_subdomain` (String) Subdomain used for open tracking links.
 
 <a id="nestedatt--capabilities"></a>

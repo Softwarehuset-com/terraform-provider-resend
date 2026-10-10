@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -190,11 +191,11 @@ func (r *apiKeyResource) Update(ctx context.Context, req resource.UpdateRequest,
 		}
 	}
 
-	if key, rerr := r.find(ctx, plan.ID.ValueString()); rerr != nil {
-		resp.Diagnostics.AddWarning("refreshing api key after update", rerr.Error())
-	} else if key != nil {
-		mapApiKeyToState(&plan, key)
-	}
+	// No post-rename refresh: the list can lag behind the rename and would
+	// clobber the new name into state (costing a no-op rename next apply).
+	// Computed timestamps carry over from state via UseStateForUnknown.
+	plan.CreatedAt = state.CreatedAt
+	plan.LastUsedAt = state.LastUsedAt
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -215,14 +216,29 @@ func (r *apiKeyResource) ImportState(ctx context.Context, req resource.ImportSta
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
 
-// find lists the account's API keys and returns the one with the given id,
-// or nil when it no longer exists (drift).
+// maxListPages bounds pagination so an API misbehaving with endless
+// has_more cannot loop forever.
+const maxListPages = 100
+
+// find lists the account's API keys (following pagination) and returns the
+// one with the given id, or nil when it no longer exists (drift).
 func (r *apiKeyResource) find(ctx context.Context, id string) (*resend.ApiKey, error) {
-	keys, err := r.client.ApiKeys.ListWithContext(ctx)
-	if err != nil {
-		return nil, err
+	var after *string
+	for page := 0; page < maxListPages; page++ {
+		list, err := r.client.ApiKeys.ListWithOptions(ctx, &resend.ListOptions{After: after})
+		if err != nil {
+			return nil, err
+		}
+		if key := findApiKey(list.Data, id); key != nil {
+			return key, nil
+		}
+		if !list.HasMore || len(list.Data) == 0 {
+			return nil, nil
+		}
+		last := list.Data[len(list.Data)-1].Id
+		after = &last
 	}
-	return findApiKey(keys.Data, id), nil
+	return nil, fmt.Errorf("listing api keys: more than %d pages", maxListPages)
 }
 
 func findApiKey(keys []resend.ApiKey, id string) *resend.ApiKey {

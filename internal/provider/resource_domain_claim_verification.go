@@ -127,12 +127,10 @@ func (r *domainClaimVerificationResource) Create(ctx context.Context, req resour
 	}
 
 	plan.Status = types.StringValue(claim.Status)
-	if claim.BlockedReason != "" {
-		plan.BlockedReason = types.StringValue(claim.BlockedReason)
-	}
-	if claim.FailureReason != "" {
-		plan.FailureReason = types.StringValue(claim.FailureReason)
-	}
+	// Unconditional: computed attributes must never stay unknown in final
+	// state, even when empty.
+	plan.BlockedReason = types.StringValue(claim.BlockedReason)
+	plan.FailureReason = types.StringValue(claim.FailureReason)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 

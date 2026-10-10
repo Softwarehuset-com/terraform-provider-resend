@@ -51,10 +51,11 @@ func claimVerificationSchemaResp(t *testing.T) *resource.SchemaResponse {
 func claimVerificationRaw(objType tftypes.Type, domainID interface{}, status interface{}) map[string]tftypes.Value {
 	attrTypes := objType.(tftypes.Object).AttributeTypes
 	return map[string]tftypes.Value{
-		"domain_id":      tftypes.NewValue(attrTypes["domain_id"], domainID),
-		"status":         tftypes.NewValue(attrTypes["status"], status),
-		"blocked_reason": tftypes.NewValue(attrTypes["blocked_reason"], nil),
-		"failure_reason": tftypes.NewValue(attrTypes["failure_reason"], nil),
+		"domain_id": tftypes.NewValue(attrTypes["domain_id"], domainID),
+		"status":    tftypes.NewValue(attrTypes["status"], status),
+		// Real Terraform sends unknown for computed attributes at create.
+		"blocked_reason": tftypes.NewValue(attrTypes["blocked_reason"], tftypes.UnknownValue),
+		"failure_reason": tftypes.NewValue(attrTypes["failure_reason"], tftypes.UnknownValue),
 		"timeouts":       tftypes.NewValue(attrTypes["timeouts"], nil),
 	}
 }
@@ -64,6 +65,7 @@ func claimVerificationCreatePair(t *testing.T) (resource.CreateRequest, *resourc
 	s := claimVerificationSchemaResp(t).Schema
 	objType := s.Type().TerraformType(context.Background())
 
+	// Computed attributes are unknown at create, like real Terraform plans.
 	raw := claimVerificationRaw(objType, "dom-1", tftypes.UnknownValue)
 	req := resource.CreateRequest{
 		Plan: tfsdk.Plan{Raw: tftypes.NewValue(objType, raw), Schema: s},
@@ -124,6 +126,15 @@ func TestDomainClaimVerificationCreateVerified(t *testing.T) {
 	}
 	if state.Status.ValueString() != resend.DomainClaimStatusVerified {
 		t.Errorf("status should be verified, got %q", state.Status.ValueString())
+	}
+	// Terraform Core rejects unknown values in final state ("Provider
+	// returned invalid result object after apply"); success must leave the
+	// reason attributes concrete even when the claim has none.
+	if state.BlockedReason.IsUnknown() || state.BlockedReason.IsNull() {
+		t.Error("blocked_reason must be a concrete (possibly empty) string in final state")
+	}
+	if state.FailureReason.IsUnknown() || state.FailureReason.IsNull() {
+		t.Error("failure_reason must be a concrete (possibly empty) string in final state")
 	}
 }
 

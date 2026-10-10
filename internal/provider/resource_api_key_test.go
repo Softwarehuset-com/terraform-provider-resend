@@ -309,3 +309,34 @@ func TestApiKeyCreateSurvivesSlowList(t *testing.T) {
 		t.Error("last_used_at must not leak unknown into final state")
 	}
 }
+
+// TestApiKeyFindFollowsPagination pins the review finding: a live key past
+// the first page must be found (a miss would look like drift and destroy/
+// recreate the key, rotating its token).
+func TestApiKeyFindFollowsPagination(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("after") {
+		case "":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{{"id": "key-1", "name": "first"}}, "has_more": true,
+			})
+		case "key-1":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{{"id": "key-2", "name": "second"}}, "has_more": false,
+			})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "has_more": false})
+		}
+	}))
+	defer srv.Close()
+
+	r := &apiKeyResource{client: NewResendClient("re_test", srv.URL)}
+	key, err := r.find(context.Background(), "key-2")
+	if err != nil {
+		t.Fatalf("find should page through results: %v", err)
+	}
+	if key == nil || key.Name != "second" {
+		t.Fatalf("key-2 must be found on page 2, got %+v", key)
+	}
+}

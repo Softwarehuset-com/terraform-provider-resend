@@ -52,19 +52,18 @@ func (d *domainDataSource) Schema(_ context.Context, _ datasource.SchemaRequest,
 				Optional:    true,
 				Computed:    true,
 				Description: "Resend domain id to look up. Exactly one of id or name must be set.",
-				Validators: []validator.String{
-					stringvalidator.ExactlyOneOf(path.MatchRoot("name")),
-				},
 			},
 			"name": datasourceschema.StringAttribute{
 				Optional:    true,
 				Computed:    true,
 				Description: "Domain name to look up (exact match). Exactly one of id or name must be set.",
 				Validators: []validator.String{
+					// Declared once: ExactlyOneOf evaluates the whole
+					// (name, id) set regardless of which side is configured.
 					stringvalidator.ExactlyOneOf(path.MatchRoot("id")),
 				},
 			},
-			"status":             datasourceschema.StringAttribute{Computed: true, Description: "Domain status: pending, verified, failed, not_started."},
+			"status":             datasourceschema.StringAttribute{Computed: true, Description: "Domain status: pending, verified, partially_verified, not_started or failed."},
 			"region":             datasourceschema.StringAttribute{Computed: true, Description: "Region the domain is hosted in."},
 			"created_at":         datasourceschema.StringAttribute{Computed: true, Description: "Creation timestamp."},
 			"tracking_subdomain": datasourceschema.StringAttribute{Computed: true, Description: "Subdomain used for open tracking links."},
@@ -125,12 +124,23 @@ func (d *domainDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 		}
 		dom = found
 	} else {
-		list, err := d.client.Domains.ListWithContext(ctx)
-		if err != nil {
-			resp.Diagnostics.Append(diagFromErr("listing domains", err)...)
-			return
+		// Page through the domain list (Resend omits records in list
+		// responses; the matched domain is fetched in full below).
+		var matches []resend.Domain
+		var after *string
+		for page := 0; page < maxListPages; page++ {
+			list, err := d.client.Domains.ListWithOptions(ctx, &resend.ListOptions{After: after})
+			if err != nil {
+				resp.Diagnostics.Append(diagFromErr("listing domains", err)...)
+				return
+			}
+			matches = append(matches, filterDomainsByName(list.Data, config.Name.ValueString())...)
+			if !list.HasMore || len(list.Data) == 0 {
+				break
+			}
+			last := list.Data[len(list.Data)-1].Id
+			after = &last
 		}
-		matches := filterDomainsByName(list.Data, config.Name.ValueString())
 		switch len(matches) {
 		case 0:
 			resp.Diagnostics.AddError(

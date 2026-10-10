@@ -92,5 +92,7 @@ func (p *resendProvider) Resources(ctx context.Context) []func() resource.Resour
 }
 
 func (p *resendProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
-	return nil
+	return []func() datasource.DataSource{
+		NewDomainDataSource,
+	}
 }

@@ -7,7 +7,9 @@ description: |-
 
 # Resend Provider
 
-Manage [Resend](https://resend.com) domains, domain verification and webhooks with Terraform. The flagship use case is inbound email: register a domain with the `receiving` capability, publish the returned DNS records (including MX), verify the domain, and subscribe an `email.received` webhook so inbound mail is POSTed to your HTTP endpoint.
+Manage [Resend](https://resend.com) domains, domain verification, API keys, domain claims and webhooks with Terraform. Existing domains can be read with the `resend_domain` data source (by id or name) to wire their DNS records into any DNS provider, and domains verified under another Resend account can be taken over via the `resend_domain_claim` + `resend_domain_claim_verification` pair.
+
+The flagship use case is inbound email: register a domain with the `receiving` capability, publish the returned DNS records (including MX), verify the domain, and subscribe an `email.received` webhook so inbound mail is POSTed to your HTTP endpoint.
 
 ## Example Usage
 

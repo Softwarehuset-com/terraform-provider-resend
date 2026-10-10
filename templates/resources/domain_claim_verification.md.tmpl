@@ -1,0 +1,24 @@
+---
+subcategory: ""
+page_title: "Resend: resend_domain_claim_verification"
+description: |-
+  Triggers verification of a Resend domain claim and waits until the TXT record check passes (status verified or completed). Publish the claim's TXT record first and point depends_on at the DNS resources so they exist before verification runs. A failed verification is not persisted, so the next apply retries automatically.
+---
+
+# resend_domain_claim_verification
+
+Triggers claim verification and polls until it passes.
+
+## Example Usage
+
+{{ codefile "terraform" .ExampleFile }}
+
+{{ .SchemaMarkdown }}
+
+## Import
+
+Import is supported using the following syntax (the verification resource's ID equals the claim's domain ID):
+
+```shell
+terraform import resend_domain_claim_verification.takeover <domain-id>
+```

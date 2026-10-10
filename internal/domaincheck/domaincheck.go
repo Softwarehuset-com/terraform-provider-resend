@@ -27,6 +27,57 @@ type Getter interface {
 	GetWithContext(ctx context.Context, domainId string) (resend.Domain, error)
 }
 
+// ClaimGetter is the subset of the resend-go domain claims service the
+// claim poller needs. *resend.DomainClaimsSvcImpl satisfies it via
+// client.DomainClaims.
+type ClaimGetter interface {
+	GetWithContext(ctx context.Context, domainId string) (resend.DomainClaim, error)
+}
+
+// ErrClaimNotVerified is returned when the timeout elapses before a domain
+// claim reaches verified/completed.
+var ErrClaimNotVerified = errors.New("domain claim not verified before timeout")
+
+// WaitForClaimVerified polls a domain claim until it reaches verified or
+// completed, a terminal failure state, or the timeout elapses. Failure
+// states surface their blocked/failure reason in the error message.
+func WaitForClaimVerified(ctx context.Context, c ClaimGetter, domainID string, tick, timeout time.Duration, sleep func(context.Context, time.Duration) error) (resend.DomainClaim, error) {
+	deadline := time.Now().Add(timeout)
+	interval := tick
+	if interval > time.Minute {
+		interval = time.Minute
+	}
+
+	for {
+		claim, err := c.GetWithContext(ctx, domainID)
+		if err != nil {
+			return claim, fmt.Errorf("reading domain claim during verification: %w", err)
+		}
+
+		switch claim.Status {
+		case resend.DomainClaimStatusVerified, resend.DomainClaimStatusCompleted:
+			return claim, nil
+		case resend.DomainClaimStatusBlocked:
+			return claim, fmt.Errorf("domain claim blocked (status: %s): %s", resend.DomainClaimStatusBlocked, claim.BlockedReason)
+		case resend.DomainClaimStatusFailed:
+			return claim, fmt.Errorf("domain claim failed: %s", claim.FailureReason)
+		case resend.DomainClaimStatusExpired, resend.DomainClaimStatusSuperseded, resend.DomainClaimStatusCanceled:
+			return claim, fmt.Errorf("domain claim reached terminal status %q", claim.Status)
+		}
+
+		if time.Now().After(deadline) {
+			return claim, ErrClaimNotVerified
+		}
+
+		if err := sleep(ctx, interval); err != nil {
+			return claim, fmt.Errorf("waiting for domain claim verification: %w", err)
+		}
+		if interval *= 2; interval > time.Minute {
+			interval = time.Minute
+		}
+	}
+}
+
 // WaitForVerified polls the domain until verification reaches a terminal
 // status, the timeout elapses, or ctx is cancelled. tick is the initial poll
 // interval (it grows up to a minute); sleep is injected so tests run without

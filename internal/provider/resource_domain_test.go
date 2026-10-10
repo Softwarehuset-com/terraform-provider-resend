@@ -1,11 +1,15 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,7 +21,9 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	tfsdk "github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	resend "github.com/resend/resend-go/v4"
 )
 
@@ -189,10 +195,7 @@ func TestFinalizeDomainState(t *testing.T) {
 		OpenTracking:      types.BoolUnknown(),
 		ClickTracking:     types.BoolUnknown(),
 		Tls:               types.StringUnknown(),
-		Capabilities: &domainCapabilitiesModel{
-			Sending:   types.StringUnknown(),
-			Receiving: types.StringUnknown(),
-		},
+		Capabilities:      types.ObjectUnknown(capabilitiesAttrTypes),
 	}
 
 	// Simulate an API response that omits region/capabilities entirely.
@@ -218,10 +221,16 @@ func TestFinalizeDomainState(t *testing.T) {
 	if m.OpenTracking.IsUnknown() || m.ClickTracking.IsUnknown() {
 		t.Error("tracking bools still unknown after finalize")
 	}
-	if m.Capabilities != nil {
-		if m.Capabilities.Sending.IsUnknown() || m.Capabilities.Receiving.IsUnknown() {
-			t.Error("capabilities still unknown after finalize")
-		}
+	if m.Capabilities.IsUnknown() || m.Capabilities.IsNull() {
+		t.Fatal("capabilities should be a concrete object after finalize")
+	}
+	sending, _ := m.Capabilities.Attributes()["sending"].(types.String)
+	receiving, _ := m.Capabilities.Attributes()["receiving"].(types.String)
+	if sending.IsUnknown() || sending.IsNull() || receiving.IsUnknown() || receiving.IsNull() {
+		t.Error("capabilities members still unknown/null after finalize")
+	}
+	if sending.ValueString() != resend.DomainCapabilityStatusEnabled || receiving.ValueString() != resend.DomainCapabilityStatusDisabled {
+		t.Errorf("capabilities defaults wrong: sending=%q receiving=%q", sending.ValueString(), receiving.ValueString())
 	}
 }
 
@@ -297,4 +306,76 @@ resource "resend_domain" "test" {
   click_tracking     = %[2]s
 }
 `, name, clickTracking)
+}
+
+// TestDomainCreateWithoutCapabilitiesBlock reproduces a latent v1.0.1 bug:
+// capabilities is Optional+Computed, so on first create without the block
+// the plan value is an unknown object, which a struct-pointer model cannot
+// hold ("Value Conversion Error ... Path: capabilities"). Exercised via a
+// fake API so no network is needed.
+func TestDomainCreateWithoutCapabilitiesBlock(t *testing.T) {
+	var createBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/domains"):
+			_ = json.NewDecoder(r.Body).Decode(&createBody)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "d-1", "name": "mail.appcompany.com", "status": "pending", "region": "us-east-1",
+			})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/domains/d-1"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "d-1", "name": "mail.appcompany.com", "status": "pending", "region": "us-east-1",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	r := &domainResource{client: NewResendClient("re_test", srv.URL)}
+	sch := domainSchema(t)
+	objType := sch.Type().TerraformType(context.Background()).(tftypes.Object)
+	attrTypes := objType.AttributeTypes
+
+	raw := map[string]tftypes.Value{
+		"name":         tftypes.NewValue(attrTypes["name"], "mail.appcompany.com"),
+		"capabilities": tftypes.NewValue(attrTypes["capabilities"], tftypes.UnknownValue),
+	}
+	for _, a := range []string{"region", "custom_return_path", "tls", "tracking_subdomain", "open_tracking", "click_tracking"} {
+		raw[a] = tftypes.NewValue(attrTypes[a], nil)
+	}
+	for _, a := range []string{"id", "status", "created_at", "records"} {
+		raw[a] = tftypes.NewValue(attrTypes[a], tftypes.UnknownValue)
+	}
+
+	req := resource.CreateRequest{
+		Plan: tfsdk.Plan{Raw: tftypes.NewValue(objType, raw), Schema: sch},
+	}
+	resp := resource.CreateResponse{
+		State: tfsdk.State{Raw: tftypes.NewValue(objType, tftypes.UnknownValue), Schema: sch},
+	}
+	r.Create(context.Background(), req, &resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("create without capabilities block should not error: %v", resp.Diagnostics)
+	}
+	if _, has := createBody["capabilities"]; has {
+		t.Errorf("create request should omit capabilities when block absent, got body %v", createBody)
+	}
+
+	// Finalized state must hold concrete API defaults, never unknown.
+	var state domainResourceModel
+	if diags := resp.State.Get(context.Background(), &state); diags.HasError() {
+		t.Fatalf("reading back state: %v", diags)
+	}
+	caps := state.Capabilities
+	sending, _ := caps.Attributes()["sending"].(types.String)
+	receiving, _ := caps.Attributes()["receiving"].(types.String)
+	if sending.ValueString() != resend.DomainCapabilityStatusEnabled {
+		t.Errorf("sending default should be enabled, got %q", sending.ValueString())
+	}
+	if receiving.ValueString() != resend.DomainCapabilityStatusDisabled {
+		t.Errorf("receiving default should be disabled, got %q", receiving.ValueString())
+	}
 }

@@ -107,6 +107,11 @@ func TestProviderConfigureDefaultsBaseURL(t *testing.T) {
 	if _, ok := resp.ResourceData.(*resend.Client); !ok {
 		t.Fatalf("expected ResourceData to be *resend.Client, got %T", resp.ResourceData)
 	}
+	// Data sources receive their client via DataSourceData; forgetting it
+	// leaves every data source with a nil client (panic at first Read).
+	if _, ok := resp.DataSourceData.(*resend.Client); !ok {
+		t.Fatalf("expected DataSourceData to be *resend.Client, got %T", resp.DataSourceData)
+	}
 }
 
 func TestProviderConfigureMissingKey(t *testing.T) {

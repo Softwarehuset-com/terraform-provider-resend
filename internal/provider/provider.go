@@ -80,6 +80,7 @@ func (p *resendProvider) Configure(ctx context.Context, req provider.ConfigureRe
 
 	client := NewResendClient(apiKey, baseURL)
 	resp.ResourceData = client
+	resp.DataSourceData = client
 }
 
 func (p *resendProvider) Resources(ctx context.Context) []func() resource.Resource {
@@ -87,9 +88,14 @@ func (p *resendProvider) Resources(ctx context.Context) []func() resource.Resour
 		NewDomainResource,
 		NewDomainVerificationResource,
 		NewWebhookResource,
+		NewApiKeyResource,
+		NewDomainClaimResource,
+		NewDomainClaimVerificationResource,
 	}
 }
 
 func (p *resendProvider) DataSources(ctx context.Context) []func() datasource.DataSource {
-	return nil
+	return []func() datasource.DataSource{
+		NewDomainDataSource,
+	}
 }

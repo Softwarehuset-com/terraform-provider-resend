@@ -1,0 +1,22 @@
+---
+subcategory: ""
+page_title: "Resend: resend_domain_claim"
+description: |-
+  Starts a Resend domain claim to take over a domain another Resend account has verified. The computed `record` attribute is the TXT record to publish in the claimed domain's DNS. Complete the flow with `resend_domain_claim_verification` once the record is in place. Destroying this resource does not cancel the claim server-side; abandoned claims expire on their own.
+---
+
+# resend_domain_claim
+
+Starts a domain claim.
+
+## Example Usage
+
+{{ codefile "terraform" .ExampleFile }}
+
+{{ .SchemaMarkdown }}
+
+## Lifecycle
+
+1. Create the claim — the computed `record` (TXT) is only known afterwards, which is why this resource does not verify.
+2. Publish `record` in the claimed domain's DNS (point your DNS resources at `resend_domain_claim.this.record`).
+3. Create a `resend_domain_claim_verification` referencing this resource's `domain_id`.
